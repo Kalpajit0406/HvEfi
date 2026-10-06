@@ -263,4 +263,4 @@ Contributions are welcome. Areas where help is needed:
 
 ## License
 
-All rights reserved. This code is provided for educational and research purposes.
+[MIT License](LICENSE)
