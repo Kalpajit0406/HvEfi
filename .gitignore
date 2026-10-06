@@ -1,0 +1,9 @@
+*.efi
+*.obj
+*.lib
+*.dll
+*.pdb
+*.map
+*.zip
+build_manifest.txt
+Build/

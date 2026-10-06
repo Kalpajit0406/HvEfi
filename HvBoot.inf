@@ -1,0 +1,66 @@
+## @file
+#  HvBoot — UEFI_APPLICATION bootstrap that loads the HvEfi hypervisor core.
+#
+#  An earlier hypothesis claimed Dell's BDS only calls Boot#### entries whose
+#  image subsystem is EFI_APPLICATION (0xA) and silently skips 0xC runtime
+#  drivers. DISPROVEN by the HvProbe one-shot and by the direct 0xC driver
+#  demonstrably running (and hanging) in this same slot: the firmware calls
+#  the entry point regardless of subsystem. The bridge is optional — it is a
+#  two-file layout that records receipt lines around the core's start
+#  (BOOT HIT / BOOT PATH / BOOT START / BOOT SAFE|BOOT FAIL st=... / BOOT
+#  DONE), which makes slot-level failures diagnosable from Windows.
+#
+#  Load contract: HvBoot builds a FILE device path for \EFI\Boot\hvcore.efi
+#  from its own LoadedImage->FilePath and LoadImages that path, so the loaded
+#  core gets a real DeviceHandle (a bare source-buffer load leaves it NULL
+#  and the core's own receipt writes silently no-op). Buffer load is the
+#  fallback only. HvBoot NEVER returns EFI_SUCCESS — BdsEntry.c
+#  BootBootOptions() stops the BootOrder walk on EFI_SUCCESS when a boot
+#  manager menu exists — so BDS always continues to the Windows Boot
+#  Manager. The resident core (0xC, EFI_SUCCESS from StartImage) survives
+#  HvBoot's unload: CoreUnloadAndCloseImage does not recurse into child
+#  images.
+#
+#  Build:
+#    1. Copy HvEfi/HvBoot.* into your EDK2 workspace alongside the rest.
+#    2. Add HvEfi/HvBoot.inf to your DSC [Components] section.
+#    3. build -a X64 -t VS2022 -p <platform>.dsc -m HvEfi/HvBoot.inf -b RELEASE
+#    4. Install with the launcher:
+#         HvLauncher.exe --install-core <HvEfi.efi>   (patched, hashed)
+#         HvLauncher.exe --install-raw  <HvBoot.efi>  (points the slot here)
+#
+#  Copyright (c) 2026. All rights reserved.
+#  SPDX-License-Identifier: BSD-2-Clause
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010017
+  BASE_NAME                      = HvBoot
+  FILE_GUID                      = D5B1E9F3-2A7C-6D4E-8F3B-5C6A7B8C9D1E
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = HvBootMain
+
+[Sources]
+  HvBoot.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid         ## CONSUMES
+  gEfiSimpleFileSystemProtocolGuid    ## CONSUMES
+
+[Guids]
+  gEfiFileInfoGuid
+  gEfiGlobalVariableGuid
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  BaseMemoryLib
+
+[BuildOptions]
+  # Match HvEfi: intrinsics on, security cookie off (no CRT), strict preprocessor.
+  MSFT:*_*_X64_CC_FLAGS = /O2 /GS- /Oi /wd4201 /Zc:preprocessor

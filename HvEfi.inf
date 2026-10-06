@@ -1,0 +1,105 @@
+## @file
+#  HvEfi — EFI DXE Runtime VMX Hypervisor
+#
+#  Virtualises all logical CPUs before ExitBootServices. The OS kernel
+#  boots under VMX non-root with EPT-based physical memory access via
+#  authenticated VMCALL hypercalls.
+#
+#  Build:
+#    1. Clone EDK2 and set up the build environment (edksetup.bat)
+#    2. Copy HvEfi/ into your EDK2 workspace (e.g. edk2/HvEfi/)
+#    3. Add HvEfi/HvEfi.inf to your platform DSC [Components] section
+#    4. build -a X64 -t VS2019 -p <YourPlatform>.dsc -m HvEfi/HvEfi.inf
+#    5. Copy Build/.../HvEfi.efi to your EFI System Partition
+#    6. Register as a DXE driver in your firmware (or load via UEFI Shell)
+#
+#  Copyright (c) 2026. All rights reserved.
+#  SPDX-License-Identifier: BSD-2-Clause
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010017
+  BASE_NAME                      = HvEfi
+  FILE_GUID                      = A3B7C1D5-E9F2-4A6B-8C0D-1E2F3A4B5C6D
+  MODULE_TYPE                    = DXE_RUNTIME_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = HvEfiDriverEntry
+
+[Sources]
+  hv_efi_main.c
+  hv_efi_vmx.c
+  hv_efi_ept.c
+  hv_efi_smp.c
+  hv_efi_hypercall.c
+  hv_exit.c
+  hv_vmcs.c
+  hv_asm.asm
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  UefiCpuPkg/UefiCpuPkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  SynchronizationLib
+
+[Protocols]
+  gEfiMpServiceProtocolGuid      ## CONSUMES
+
+[Guids]
+  # Auth ticket EFI variable GUID — sentinel value patched at install time by
+  # InstallEfiBinary(); the real GUID is random (RFC 4122 v4) and persisted
+  # in the registry by WriteEfiVarGuidRegistry.  The value below is the
+  # compile-time sentinel only; it never appears in a provisioned binary.
+  # {7A3F1B2C-9E5D-4A8B-B6C1-D0E2F3A4B5C6}
+
+[Depex]
+  # TRUE: load unconditionally. Our driver checks for MP services at runtime
+  # (gEfiBS->LocateProtocol in HvEfiDriverEntry Step 2) and fails gracefully
+  # if absent. A gated Depex can delay driver load past the BDS DriverOrder
+  # processing window on some firmware, so we keep it unconditional. The
+  # runtime check is the real gate.
+  TRUE
+
+[BuildOptions]
+  # MSVC: enable intrinsics, disable security cookie (no CRT in DXE)
+  # /GL- is NOT an optimisation preference, it is a correctness fix.
+  #
+  # With whole-program optimisation on, this module links to an image that
+  # is SILENTLY TRUNCATED: HvEfiDriverEntryImpl keeps its first four steps
+  # and loses everything from Step 5 onward - no session keys, no decoy
+  # pages, no VMX init, no EPT hiding, no VMLAUNCH, no code or string from
+  # that half at all. The build still reports success and produces a
+  # plausible-looking .efi; the loss is only visible by reading the binary.
+  #
+  # Reproduced on VS2022 / MSVC 14.51:
+  #   /GL   -> 217088 bytes, "Step 6"/"Step 13" absent from the image
+  #   /GL-  -> 237568 bytes, both present
+  #
+  # The committed HvEfi.efi predates /GL being in effect, which is why it
+  # still looks correct: the two symptoms (a truncated image and a "working"
+  # committed binary) are the same event seen from opposite ends.
+  #
+  # A driver that loses its second half does not fail loudly - it fails as
+  # "the EFI broke the machine", which is the single most expensive bug in
+  # this project. So /GL- stays, and build_hvefi.bat now asserts the
+  # markers are present rather than trusting the exit code.
+  MSFT:*_*_X64_CC_FLAGS = /O2 /GS- /Oi /wd4201 /Zc:preprocessor /DHV_EFI_BUILD /GL-
+  # The exit telemetry (ExitCounts[64], HV_HYPERCALL_QUERY_EXIT_COUNTS 0x000C)
+  # is gated on `#if DBG` — the WDK's checked-build convention. Edk2 has no
+  # DBG, so without this the telemetry is compiled out of the DEBUG driver and
+  # no harness can read it. Define it for the DEBUG target only, so RELEASE
+  # keeps the telemetry out exactly as before. See tools/stealthlab/README.md.
+  MSFT:DEBUG_*_*_CC_FLAGS = /D DBG
+  # Runtime driver under MSFT toolchain: raise section alignment so the LTCG
+  # .CIL section (4096-aligned) is accepted by the linker.
+  MSFT:*_*_X64_DLINK_FLAGS = /ALIGN:4096 /FILEALIGN:4096
+  # NASM/MASM for the assembly file
+  MSFT:*_*_X64_ASM_FLAGS = /nologo /c /Cx
