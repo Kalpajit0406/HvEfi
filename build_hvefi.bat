@@ -90,26 +90,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     echo [!] could not bump workspace timestamps - if the build below finishes suspiciously
 echo     fast, treat the artifact as unverified and check its receipt strings.
 
-rem HvEfi is NOT self-contained: hvdefs.h pulls the shared headers from the
-rem REPO ROOT (`../hv_contract.h`, `../hv_status.h`, `../hv_siphash.h`,
-rem `../hv_copy.h`, ...) and
-rem hv_efi_vmx.c pulls `../HvDrv/hv_msr_contract.h`. They must be mirrored into
-rem the workspace beside HvEfi/ or the build fails with C1083 - which is how the
-rem workspace copy ended up stale in the first place.
-set "ROOT=%SRC%.."
-if not exist "%HV_EDK2_ROOT%\HvDrv" mkdir "%HV_EDK2_ROOT%\HvDrv"
+rem Shared headers live in shared/ in this repo. They are placed beside HvEfi/
+rem in the EDK2 workspace so that `#include "shared/hv_contract.h"` etc. resolve
+rem correctly from inside %HV_EDK2_ROOT%\HvEfi\.
+set "SHARED=%SRC%shared"
+if not exist "%DST%\shared" mkdir "%DST%\shared"
+if not exist "%DST%\shared\HvDrv" mkdir "%DST%\shared\HvDrv"
 for %%F in (hv_auth.h hv_contract.h hv_copy.h hv_ept_decision.h hv_hostidt.h hv_ptwalk.h hv_ramrange.h hv_segs.h hv_siphash.h hv_smp_index.h hv_xsave.h hv_status.h) do (
-    if not exist "%ROOT%\%%F" (
-        echo [-] Missing shared header: %ROOT%\%%F
+    if not exist "%SHARED%\%%F" (
+        echo [-] Missing shared header: %SHARED%\%%F
         exit /b 1
     )
-    copy /y "%ROOT%\%%F" "%HV_EDK2_ROOT%\%%F" >nul || exit /b 1
+    copy /y "%SHARED%\%%F" "%DST%\shared\%%F" >nul || exit /b 1
 )
-if not exist "%ROOT%\HvDrv\hv_msr_contract.h" (
-    echo [-] Missing %ROOT%\HvDrv\hv_msr_contract.h
+if not exist "%SHARED%\HvDrv\hv_msr_contract.h" (
+    echo [-] Missing %SHARED%\HvDrv\hv_msr_contract.h
     exit /b 1
 )
-copy /y "%ROOT%\HvDrv\hv_msr_contract.h" "%HV_EDK2_ROOT%\HvDrv\hv_msr_contract.h" >nul || exit /b 1
+copy /y "%SHARED%\HvDrv\hv_msr_contract.h" "%DST%\shared\HvDrv\hv_msr_contract.h" >nul || exit /b 1
 
 echo [*] Building (%HV_BUILD_TARGET%) ...
 pushd "%HV_EDK2_ROOT%"
@@ -237,13 +235,19 @@ rem repo copies this script stages from them. A silent staging failure would
 rem otherwise leave a stale, unpatchable image in the repo under a green build.
 rem
 rem check_sentinels.ps1 parses the expected bytes out of the single owner in
-rem hv_launcher.c, so this is not a fourth copy of the pattern.
+rem hv_launcher.c. In the standalone HvEfi repo, hv_launcher.c is not present,
+rem so the sentinel check is skipped. When building from the full Hypervisor
+rem repo, set HV_LAUNCHER_SRC to the launcher source path to enable it.
 if "%MISSING%"=="0" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%SRC%check_sentinels.ps1" -LauncherSource "%SRC%..\Hypervisor\hv_launcher.c" -Images "%OUT%;%BOOTOUT%;%SRC%HvEfi.efi;%SRC%HvBoot.efi"
-    if errorlevel 1 (
-        echo [!] Ticket sentinel check FAILED - see the diagnosis above.
-        echo     The launcher would refuse these images as unpatchable.
-        set "MISSING=1"
+    if defined HV_LAUNCHER_SRC (
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%SRC%check_sentinels.ps1" -LauncherSource "%HV_LAUNCHER_SRC%" -Images "%OUT%;%BOOTOUT%;%SRC%HvEfi.efi;%SRC%HvBoot.efi"
+        if errorlevel 1 (
+            echo [!] Ticket sentinel check FAILED - see the diagnosis above.
+            echo     The launcher would refuse these images as unpatchable.
+            set "MISSING=1"
+        )
+    ) else (
+        echo [*] Sentinel check skipped ^(set HV_LAUNCHER_SRC to enable^)
     )
 )
 
