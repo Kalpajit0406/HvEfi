@@ -1,4 +1,4 @@
-﻿// hv_efi_smp.c - Multi-processor VMX launch via EFI_MP_SERVICES_PROTOCOL.
+// hv_efi_smp.c - Multi-processor VMX launch via EFI_MP_SERVICES_PROTOCOL.
 //
 // EFI equivalent of HvDrv/hv_smp.c.  Uses StartupAllAPs + direct BSP call
 // instead of KeIpiGenericCall.
@@ -6,7 +6,7 @@
 #include "hv_efi.h"
 // Fail-closed resolution of a processor handle to a VCPU slot (Pass 94). The
 // old fallback below fed an x2APIC ID into an array indexed BY HANDLE.
-#include "shared/hv_smp_index.h"
+#include "../hv_smp_index.h"
 
 // ── Per-CPU index ───────────────────────────────────────────────────────────
 // In EFI, MpServices->WhoAmI gives a sequential processor number — but only
@@ -125,6 +125,16 @@ static void VirtualizeCpuBody(PVOID context) {
     // Record the APIC ID now (MP Services valid in DXE): the runtime exit
     // path resolves VCPUs from this table and never touches gEfiMp.
     vcpu->ApicId = HvReadApicIdLocal();
+
+    // Core Exclusion Check (Pass 96): skip virtualization for flagged cores
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        UINT64 mask = HvMailboxCoreExclusionMaskGet(g_Mailbox);
+        if (mask & (1ULL << idx)) {
+            vcpu->Launched = FALSE;
+            vcpu->VmxEnabled = FALSE;
+            return;
+        }
+    }
 
     // Enable VMX in CR4
     UINT64 cr4 = __readcr4();
@@ -601,9 +611,25 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
         // EFI_TIMEOUT falls through: g_VmxonSuccess < VcpuCount triggers rollback
     }
 
+    // Compute target VCPU count taking exclusion mask into account
+    UINT32 targetCount = g_Hv.VcpuCount;
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        UINT64 mask = HvMailboxCoreExclusionMaskGet(g_Mailbox);
+        if (mask != 0) {
+            UINT32 excluded = 0;
+            for (UINT32 k = 0; k < g_Hv.VcpuCount; k++) {
+                if (mask & (1ULL << k)) excluded++;
+            }
+            if (excluded < targetCount) {
+                targetCount -= excluded;
+            }
+        }
+    }
+    g_Hv.TargetVcpuCount = targetCount;
+
     // Read the terminated-AP list into the summary BEFORE freeing it:
     // MP Services owns the allocation, so this is the only chance.
-    if ((UINT32)g_VmxonSuccess < g_Hv.VcpuCount) {
+    if ((UINT32)g_VmxonSuccess < g_Hv.TargetVcpuCount) {
         HvReportBringUpSummary((const UINTN *)failedList);
     }
     if (failedList != NULL) {
@@ -635,12 +661,12 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
                  (int)g_Hv.CbInFlight);
     }
 
-    if ((UINT32)g_VmxonSuccess < g_Hv.VcpuCount) {
+    if ((UINT32)g_VmxonSuccess < g_Hv.TargetVcpuCount) {
         // Disable hypercall interface before logging or rolling back, so that
         // any hypercalls issued during the window are silently refused.
         HvEnterDarkMode(HV_DARK_PARTIAL_LAUNCH);
         EfiFatal("VMX: only %d/%d CPUs launched, rolling back\n",
-                 g_VmxonSuccess, g_Hv.VcpuCount);
+                 g_VmxonSuccess, g_Hv.TargetVcpuCount);
 
         // Partial success — devirtualize those that succeeded
         g_Hv.Running = TRUE;  // devirtualize path needs Running set

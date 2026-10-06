@@ -620,3 +620,118 @@ void HvEptUnhidePages(PEPT_STATE ept) {
     SetMem(ept->SplitOriginalPd, ept->SplitCount * sizeof(ept->SplitOriginalPd[0]), 0);
     ept->SplitCount = 0;
 }
+
+// ── EPT stealth hook support ────────────────────────────────────────────────
+// Split-view EPT: shadow page has hooked code (X-only), original page is
+// shown on reads (RW, no X). MTF single-steps the transition back.
+
+static NTSTATUS EptRuntimeSplit(PEPT_STATE ept, PEPT_PTE pdEntry,
+                                UINT64 regionBase) {
+    if (!pdEntry->LargePage) return STATUS_SUCCESS;
+    if (ept->SplitCount >= HV_MAX_SPLIT_PAGES) return STATUS_INSUFFICIENT_RESOURCES;
+    if (g_Hv.SparePtsUsed >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
+
+    PEPT_PTE pt = (PEPT_PTE)g_Hv.SparePtPool[g_Hv.SparePtsUsed++];
+    if (!pt) return STATUS_INSUFFICIENT_RESOURCES;
+
+    UINT64 origMemType = pdEntry->MemoryType;
+    UINT64 origIgnorePat = pdEntry->IgnorePat;
+    UINT64 origPd = pdEntry->Value;
+
+    for (UINT32 i = 0; i < 512; i++) {
+        UINT64 pa = regionBase + (UINT64)i * PAGE_SIZE;
+        pt[i].Value = 0;
+        pt[i].Read      = 1;
+        pt[i].Write     = 1;
+        pt[i].Execute   = 1;
+        pt[i].MemoryType = origMemType;
+        pt[i].IgnorePat  = origIgnorePat;
+        pt[i].PhysAddr   = pa >> 12;
+    }
+
+    EptRecordPtPage(ept, pt, regionBase, origPd);
+
+    pdEntry->Value = 0;
+    pdEntry->Read    = 1;
+    pdEntry->Write   = 1;
+    pdEntry->Execute = 1;
+    pdEntry->PhysAddr = EfiVaToPA(pt) >> 12;
+
+    return STATUS_SUCCESS;
+}
+
+UINT32 HvEptFindHook(UINT64 gpa) {
+    UINT64 page = gpa & ~0xFFFULL;
+    for (UINT32 i = 0; i < g_Hv.EptHookCount; i++) {
+        if (g_Hv.EptHooks[i].Active && g_Hv.EptHooks[i].TargetGpa == page)
+            return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+NTSTATUS HvEptInstallHook(PEPT_STATE ept, UINT64 targetGpa,
+                          const UINT8 *hookBytes, UINT32 hookLen) {
+    if (g_Hv.EptHookCount >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
+    if (g_Hv.ShadowPagesUsed >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
+
+    UINT64 pageGpa = targetGpa & ~0xFFFULL;
+    UINT32 offset  = (UINT32)(targetGpa & 0xFFF);
+    if ((UINT64)offset + hookLen > PAGE_SIZE) return STATUS_INVALID_PARAMETER;
+
+    if (HvEptFindHook(pageGpa) != 0xFFFFFFFFu)
+        return STATUS_ALREADY_REGISTERED;
+
+    UINT64 regionBase = pageGpa & ~((1ULL << EPT_PD_SHIFT) - 1);
+    UINT64 pml4i = (pageGpa >> EPT_PML4_SHIFT) & EPT_ENTRY_MASK;
+    UINT64 pdpti = (pageGpa >> EPT_PDPT_SHIFT) & EPT_ENTRY_MASK;
+    UINT64 pdi   = (pageGpa >> EPT_PD_SHIFT)   & EPT_ENTRY_MASK;
+    UINT64 pti   = (pageGpa >> EPT_PT_SHIFT)   & EPT_ENTRY_MASK;
+
+    if (!ept->Pml4[pml4i].Read) return STATUS_INVALID_PARAMETER;
+    PEPT_PTE pdpt = (PEPT_PTE)EfiPaToVa(ept->Pml4[pml4i].PhysAddr << 12);
+    if (!pdpt[pdpti].Read || pdpt[pdpti].LargePage) return STATUS_INVALID_PARAMETER;
+    PEPT_PTE pd = (PEPT_PTE)EfiPaToVa(pdpt[pdpti].PhysAddr << 12);
+
+    if (pd[pdi].LargePage) {
+        NTSTATUS ns = EptRuntimeSplit(ept, &pd[pdi], regionBase);
+        if (!NT_SUCCESS(ns)) return ns;
+    }
+
+    PEPT_PTE pt = (PEPT_PTE)EfiPaToVa(pd[pdi].PhysAddr << 12);
+    PEPT_PTE pte = &pt[pti];
+
+    PVOID shadow = g_Hv.ShadowPagePool[g_Hv.ShadowPagesUsed++];
+    if (!shadow) return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(shadow, (PVOID)(UINTN)pageGpa, PAGE_SIZE);
+    RtlCopyMemory((UINT8 *)shadow + offset, hookBytes, hookLen);
+
+    UINT32 idx = g_Hv.EptHookCount++;
+    g_Hv.EptHooks[idx].TargetGpa    = pageGpa;
+    g_Hv.EptHooks[idx].ShadowPagePa = EfiVaToPA(shadow);
+    g_Hv.EptHooks[idx].OrigPteValue = pte->Value;
+    g_Hv.EptHooks[idx].PtePtr       = pte;
+    g_Hv.EptHooks[idx].Active       = 1;
+
+    pte->PhysAddr = g_Hv.EptHooks[idx].ShadowPagePa >> 12;
+    pte->Read    = 0;
+    pte->Write   = 0;
+    pte->Execute = 1;
+
+    HvEptInvalidate();
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS HvEptRemoveHook(PEPT_STATE ept, UINT64 targetGpa) {
+    UNREFERENCED_PARAMETER(ept);
+    UINT64 pageGpa = targetGpa & ~0xFFFULL;
+    UINT32 idx = HvEptFindHook(pageGpa);
+    if (idx == 0xFFFFFFFFu) return STATUS_NOT_FOUND;
+
+    HV_EPT_HOOK *hook = &g_Hv.EptHooks[idx];
+    hook->PtePtr->Value = hook->OrigPteValue;
+    hook->Active = 0;
+
+    HvEptInvalidate();
+    return STATUS_SUCCESS;
+}

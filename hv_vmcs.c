@@ -1,4 +1,4 @@
-﻿// hv_vmcs.c - VMCS (Virtual Machine Control Structure) setup for the EFI DXE
+// hv_vmcs.c - VMCS (Virtual Machine Control Structure) setup for the EFI DXE
 // hypervisor.
 //
 // This file is kept functionally identical to HvDrv/hv_vmcs.c.
@@ -12,7 +12,7 @@
 // Called once per CPU after VMXON, from the IPI handler in hv_smp.c.
 
 #include "hvdefs.h"
-#include "shared/hv_hostidt.h"
+#include "../hv_hostidt.h"
 #include "hv_efi.h"  // EfiFatal (via DEBUG) for the two fail-hard VMCS aborts below
 
 // ── GDT / Segment helpers ───────────────────────────────────────────────────

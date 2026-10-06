@@ -150,6 +150,10 @@ static __inline BOOLEAN HvHypercallCodeKnown(UINT64 id) {
         case HV_HYPERCALL_READ_VIRT:
         case HV_HYPERCALL_WRITE_VIRT:
         case HV_HYPERCALL_GET_KERNEL_BASE:
+        case HV_HYPERCALL_QUERY_EXIT_TELEMETRY:
+        case HV_HYPERCALL_GET_TOKEN:
+        case HV_HYPERCALL_EPT_HOOK:
+        case HV_HYPERCALL_EPT_UNHOOK:
             return TRUE;
 #if DBG
         case HV_HYPERCALL_QUERY_EXIT_COUNTS:
@@ -159,6 +163,19 @@ static __inline BOOLEAN HvHypercallCodeKnown(UINT64 id) {
             return FALSE;
     }
 }
+
+// Wire format for HV_HYPERCALL_QUERY_EXIT_TELEMETRY:
+#ifndef _HV_EXIT_RECORD_DEFINED
+#define _HV_EXIT_RECORD_DEFINED
+typedef struct _HV_EXIT_RECORD {
+    UINT32 ExitReason;
+    UINT32 CpuIndex;
+    UINT64 GuestRip;
+    UINT64 GuestRsp;
+    UINT64 ExitQualification;
+    UINT64 Timestamp;
+} HV_EXIT_RECORD;
+#endif
 
 // ── EPT coverage ────────────────────────────────────────────────────────────
 // How many 512GB PML4 units the identity EPT must map to cover the RAM map,

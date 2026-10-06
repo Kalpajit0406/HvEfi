@@ -1,4 +1,4 @@
-﻿// hv_exit.c - VM-exit handler (shared design with HvDrv/hv_exit.c).
+// hv_exit.c - VM-exit handler (shared design with HvDrv/hv_exit.c).
 //
 // This file tracks HvDrv/hv_exit.c handler-for-handler. It uses only MSVC
 // intrinsics and types from hvdefs.h — no OS-specific APIs. If a handler
@@ -9,7 +9,7 @@
 // Pure EPT-violation decision, shared with HvDrv/hv_exit.c and unit-tested by
 // tools/unit/hv_ept_decision_test.c. Included here rather than duplicated so
 // the branch whose wrong answer is a hard hang exists exactly once.
-#include "shared/hv_ept_decision.h"
+#include "../hv_ept_decision.h"
 
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
@@ -387,6 +387,21 @@ static BOOLEAN HandleEptViolation(PVCPU vcpu) {
   //   above HostPml4Units × 512GB, or a crafted GPA) do we inject #PF so
   //   the guest sees a conventional page fault.
 
+  // EPT stealth hook: R/W on a hooked page → swap to original, enable MTF
+  UINT32 hookIdx = HvEptFindHook(gpa);
+  if (hookIdx != 0xFFFFFFFFu && !(qual & 4)) {
+    HV_EPT_HOOK *hook = &g_Hv.EptHooks[hookIdx];
+    hook->PtePtr->Value = hook->OrigPteValue;
+    HvEptInvalidate();
+    vcpu->MtfHookIdx = hookIdx;
+    vcpu->MtfRestorePending = TRUE;
+    SIZE_T procCtl = 0;
+    __vmx_vmread(VMCS_PROC_BASED_CONTROLS, &procCtl);
+    procCtl |= PROC_BASED_MONITOR_TRAP;
+    __vmx_vmwrite(VMCS_PROC_BASED_CONTROLS, procCtl);
+    return TRUE;
+  }
+
   // The decision itself is a pure function in ../hv_ept_decision.h, unit-tested
   // by tools/unit/hv_ept_decision_test.c against every (qual, entry-state)
   // tuple. HvDrv/hv_exit.c calls the same function, so a regression in either
@@ -688,10 +703,28 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 #endif
 
+  UINT64 rip = 0;
+  __vmx_vmread(VMCS_GUEST_RIP, &rip);
+
+#if DBG
+  // Runtime Exit Log Ring Buffer (Pass 96)
+  {
+    UINT64 rsp = 0, qual = 0;
+    __vmx_vmread(VMCS_GUEST_RSP, &rsp);
+    __vmx_vmread(VMCS_EXIT_QUALIFICATION, &qual);
+    LONG64 logIdx = InterlockedIncrement64(&g_Hv.ExitLogIndex) - 1;
+    UINT32 ringSlot = (UINT32)(logIdx & 63);
+    g_Hv.ExitLog[ringSlot].ExitReason = reason;
+    g_Hv.ExitLog[ringSlot].CpuIndex = vcpu ? vcpu->ProcessorIndex : 0xFFFFFFFFu;
+    g_Hv.ExitLog[ringSlot].GuestRip = rip;
+    g_Hv.ExitLog[ringSlot].GuestRsp = rsp;
+    g_Hv.ExitLog[ringSlot].ExitQualification = qual;
+    g_Hv.ExitLog[ringSlot].Timestamp = __rdtsc();
+  }
+#endif
+
   if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
     UINT32 idx = g_Mailbox->TotalExitCount & 15u;
-    UINT64 rip = 0;
-    __vmx_vmread(VMCS_GUEST_RIP, &rip);
     g_Mailbox->LastExitReason[idx]  = reason;
     g_Mailbox->LastExitCpu[idx]     = vcpu ? vcpu->ProcessorIndex : 0xFFFFFFFFu;
     g_Mailbox->LastExitRipLow[idx]  = (UINT32)rip;
@@ -920,13 +953,27 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   } break;
 
   case EXIT_REASON_PREEMPT_TIMER:
-  case EXIT_REASON_MTF:
   case EXIT_REASON_NMI_WINDOW:
   case EXIT_REASON_IO_SMI:
   case EXIT_REASON_SMI:
-    // Genuinely async — not instructions. RIP must NOT advance. SMIs under
-    // the default treatment (no dual-monitor STM) do not exit here at all
-    // (SDM Vol 3C 25.2); reasons 5/6 are classified defensively.
+    break;
+
+  case EXIT_REASON_MTF:
+    if (vcpu && vcpu->MtfRestorePending) {
+      HV_EPT_HOOK *mtfHook = &g_Hv.EptHooks[vcpu->MtfHookIdx];
+      if (mtfHook->Active) {
+        mtfHook->PtePtr->PhysAddr = mtfHook->ShadowPagePa >> 12;
+        mtfHook->PtePtr->Read    = 0;
+        mtfHook->PtePtr->Write   = 0;
+        mtfHook->PtePtr->Execute = 1;
+        HvEptInvalidate();
+      }
+      vcpu->MtfRestorePending = FALSE;
+      SIZE_T procCtl = 0;
+      __vmx_vmread(VMCS_PROC_BASED_CONTROLS, &procCtl);
+      procCtl &= ~(SIZE_T)PROC_BASED_MONITOR_TRAP;
+      __vmx_vmwrite(VMCS_PROC_BASED_CONTROLS, procCtl);
+    }
     break;
 
   case EXIT_REASON_INVALID_GUEST:

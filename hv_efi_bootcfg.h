@@ -165,7 +165,25 @@ typedef struct {
     unsigned int LastExitCpu[16];
     unsigned int LastExitRipLow[16];
     unsigned int LastExitRipHigh[16];
+
+    // Core Exclusion Mask (Pass 96)
+    unsigned int CoreExclusionMaskLow;
+    unsigned int CoreExclusionMaskHigh;
 } HV_MAILBOX;
+
+// Core Exclusion Mask accessors
+static __inline unsigned __int64 HvMailboxCoreExclusionMaskGet(const volatile HV_MAILBOX *mb)
+{
+    if (mb == 0) return 0;
+    return (unsigned __int64)mb->CoreExclusionMaskLow | ((unsigned __int64)mb->CoreExclusionMaskHigh << 32);
+}
+
+static __inline void HvMailboxCoreExclusionMaskSet(volatile HV_MAILBOX *mb, unsigned __int64 mask)
+{
+    if (mb == 0) return;
+    mb->CoreExclusionMaskLow = (unsigned int)(mask & 0xFFFFFFFFu);
+    mb->CoreExclusionMaskHigh = (unsigned int)(mask >> 32);
+}
 
 // Does the mailbox carry a complete, correctly-sized ticket?
 static __inline int HvMailboxTicketValid(const volatile HV_MAILBOX *mb)

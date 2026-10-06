@@ -81,10 +81,36 @@ static UINT64 TranslateUserPage(UINT64 cr3, UINT64 va, BOOLEAN write) {
 #define EPROCESS_ACTIVE_LINKS   0x448
 #define EPROCESS_UNIQUE_PID     0x440
 
-static UINT64 HcGetProcessCr3(UINT64 targetPid) {
-    UINT32 cr3Off = g_Hv.DirectoryTableOffset;
-    if (cr3Off == 0) cr3Off = 0x28;
+static UINT32 HvAutoDiscoverCr3Offset(UINT64 guestCr3, UINT64 currentEproc) {
+    if (g_Hv.DirectoryTableOffset != 0) {
+        // Verify existing offset against current EPROCESS
+        UINT64 cr3Pa = TranslateGuestVa(guestCr3, currentEproc + g_Hv.DirectoryTableOffset);
+        if (cr3Pa != (UINT64)-1) {
+            UINT64 cr3Val = 0;
+            if (ReadPhysU64Safe(cr3Pa, &cr3Val) && (cr3Val & ~0xFFFULL) == (guestCr3 & ~0xFFFULL)) {
+                return g_Hv.DirectoryTableOffset;
+            }
+        }
+    }
 
+    // Scan candidate 8-byte aligned offsets in [0x18, 0x80]
+    for (UINT32 off = 0x18; off <= 0x80; off += 8) {
+        UINT64 cr3Pa = TranslateGuestVa(guestCr3, currentEproc + off);
+        if (cr3Pa == (UINT64)-1) continue;
+        UINT64 cr3Val = 0;
+        if (ReadPhysU64Safe(cr3Pa, &cr3Val) && (cr3Val & ~0xFFFULL) == (guestCr3 & ~0xFFFULL)) {
+            g_Hv.DirectoryTableOffset = off;
+            return off;
+        }
+    }
+
+    if (g_Hv.DirectoryTableOffset == 0) {
+        g_Hv.DirectoryTableOffset = 0x28; // fallback
+    }
+    return g_Hv.DirectoryTableOffset;
+}
+
+static UINT64 HcGetProcessCr3(UINT64 targetPid) {
     // Use the current guest's CR3 to walk the process list
     SIZE_T guestCr3 = 0;
     __vmx_vmread(VMCS_GUEST_CR3, &guestCr3);
@@ -108,6 +134,9 @@ static UINT64 HcGetProcessCr3(UINT64 targetPid) {
     UINT64 startEproc;
     if (!ReadPhysU64Safe(eprocPa, &startEproc)) return (UINT64)-1;
     if (startEproc < 0x100000) return (UINT64)-1;
+
+    // Auto-discover / verify DirectoryTableBase offset against the calling process
+    UINT32 cr3Off = HvAutoDiscoverCr3Offset((UINT64)guestCr3, startEproc);
 
     // Walk ActiveProcessLinks list
     UINT64 current = startEproc;
@@ -141,6 +170,103 @@ static UINT64 HcGetProcessCr3(UINT64 targetPid) {
     }
 
     return (UINT64)-1;
+}
+
+// ── Hypercall: Get Process Token ────────────────────────────────────────────
+// Walks the EPROCESS list by PID and reads the Token field at +0x4B8.
+// Returns the raw EX_FAST_REF token value (bottom 4 bits are ref count).
+
+static UINT64 HcGetToken(UINT64 targetPid) {
+    SIZE_T guestCr3 = 0;
+    __vmx_vmread(VMCS_GUEST_CR3, &guestCr3);
+    if (guestCr3 == 0 || guestCr3 == (SIZE_T)-1) return (UINT64)-1;
+
+    SIZE_T gsBase = 0;
+    __vmx_vmread(VMCS_GUEST_GS_BASE, &gsBase);
+    if (gsBase < 0x100000) return (UINT64)-1;
+
+    UINT64 kthreadPa = TranslateGuestVa((UINT64)guestCr3, (UINT64)gsBase + 0x188);
+    if (kthreadPa == (UINT64)-1) return (UINT64)-1;
+    UINT64 kthread;
+    if (!ReadPhysU64Safe(kthreadPa, &kthread)) return (UINT64)-1;
+    if (kthread < 0x100000) return (UINT64)-1;
+
+    UINT64 eprocPa = TranslateGuestVa((UINT64)guestCr3, kthread + 0x220);
+    if (eprocPa == (UINT64)-1) return (UINT64)-1;
+    UINT64 startEproc;
+    if (!ReadPhysU64Safe(eprocPa, &startEproc)) return (UINT64)-1;
+    if (startEproc < 0x100000) return (UINT64)-1;
+
+    UINT64 current = startEproc;
+    for (UINT32 attempt = 0; attempt < 4096; attempt++) {
+        UINT64 pidPa = TranslateGuestVa((UINT64)guestCr3,
+                                         current + EPROCESS_UNIQUE_PID);
+        if (pidPa == (UINT64)-1) break;
+        UINT64 pid;
+        if (!ReadPhysU64Safe(pidPa, &pid)) break;
+
+        if (pid == targetPid) {
+            UINT64 tokenPa = TranslateGuestVa((UINT64)guestCr3,
+                                               current + EPROCESS_TOKEN_OFFSET);
+            if (tokenPa == (UINT64)-1) return (UINT64)-1;
+            UINT64 token;
+            if (!ReadPhysU64Safe(tokenPa, &token)) return (UINT64)-1;
+            return token;
+        }
+
+        UINT64 linkPa = TranslateGuestVa((UINT64)guestCr3,
+                                          current + EPROCESS_ACTIVE_LINKS);
+        if (linkPa == (UINT64)-1) break;
+        UINT64 flink;
+        if (!ReadPhysU64Safe(linkPa, &flink)) break;
+        if (flink < 0x100000) break;
+
+        current = flink - EPROCESS_ACTIVE_LINKS;
+        if (current == startEproc) break;
+    }
+
+    return (UINT64)-1;
+}
+
+// ── Hypercall: EPT stealth hook ─────────────────────────────────────────────
+// Installs a split-view EPT hook: shadow page (X-only) has the hooked code,
+// original page (RW, no X) is shown on reads. EPT violation + MTF handles
+// the transition.
+
+static UINT64 HcEptHook(UINT64 targetGva, UINT64 hookBytesVa, UINT64 hookLen) {
+    if (hookLen == 0 || hookLen > 256) return HV_STATUS_INVALID_PARAM;
+
+    SIZE_T guestCr3 = 0;
+    __vmx_vmread(VMCS_GUEST_CR3, &guestCr3);
+    UINT64 cr3 = (UINT64)guestCr3;
+
+    UINT64 targetGpa = TranslateGuestVa(cr3, targetGva);
+    if (targetGpa == (UINT64)-1) return HV_STATUS_INVALID_PARAM;
+
+    UINT8 hookBuf[256];
+    for (UINT32 i = 0; i < hookLen; i++) {
+        UINT64 bytePa = TranslateGuestVa(cr3, hookBytesVa + i);
+        if (bytePa == (UINT64)-1) return HV_STATUS_INVALID_PARAM;
+        UINT64 limit = (UINT64)g_Hv.HostPml4Units << 39;
+        if (bytePa >= limit) return HV_STATUS_INVALID_PARAM;
+        hookBuf[i] = *(volatile UINT8 *)(UINTN)bytePa;
+    }
+
+    NTSTATUS ns = HvEptInstallHook(&g_Hv.Ept, targetGpa, hookBuf, (UINT32)hookLen);
+    if (!NT_SUCCESS(ns)) return HV_STATUS_INVALID_PARAM;
+    return HV_STATUS_SUCCESS;
+}
+
+static UINT64 HcEptUnhook(UINT64 targetGva) {
+    SIZE_T guestCr3 = 0;
+    __vmx_vmread(VMCS_GUEST_CR3, &guestCr3);
+
+    UINT64 targetGpa = TranslateGuestVa((UINT64)guestCr3, targetGva);
+    if (targetGpa == (UINT64)-1) return HV_STATUS_INVALID_PARAM;
+
+    NTSTATUS ns = HvEptRemoveHook(&g_Hv.Ept, targetGpa);
+    if (!NT_SUCCESS(ns)) return HV_STATUS_INVALID_PARAM;
+    return HV_STATUS_SUCCESS;
 }
 
 // ── Accessors for the shared copy loop in hv_copy.h ─────────────────────────
@@ -621,23 +747,70 @@ UINT64 HvHypercallDispatch(PVCPU vcpu, UINT64 magic, UINT64 id, UINT64 p1,
             result = HcGetKernelBase();
             break;
 
+        case HV_HYPERCALL_GET_TOKEN:
+            result = HcGetToken(p1);
+            break;
+
+        case HV_HYPERCALL_EPT_HOOK:
+            result = HcEptHook(p1, p2, p3Real);
+            break;
+
+        case HV_HYPERCALL_EPT_UNHOOK:
+            result = HcEptUnhook(p1);
+            break;
+
+        case HV_HYPERCALL_QUERY_EXIT_TELEMETRY: {
+            // p1 = user buffer VA, p2 = max records (clamped to 64)
+            UINT64 userBufVa = p1;
+            UINT32 maxRecords = (UINT32)p2;
+            if (userBufVa == 0 || userBufVa > (UINT64)0x00007FFFFFFFFFFF) {
+                result = HV_STATUS_INVALID_PARAM;
+            } else {
+                if (maxRecords > 64) maxRecords = 64;
+                SIZE_T guestCr3Raw = 0;
+                __vmx_vmread(VMCS_GUEST_CR3, &guestCr3Raw);
+                UINT64 callerCr3 = (UINT64)guestCr3Raw;
+                UINT32 count = 0;
+                LONG64 totalExits = g_Hv.ExitLogIndex;
+                UINT32 avail = (totalExits < 64) ? (UINT32)totalExits : 64;
+                if (maxRecords > avail) maxRecords = avail;
+
+                for (UINT32 i = 0; i < maxRecords; i++) {
+                    UINT32 slot = (UINT32)((totalExits - maxRecords + i) & 63);
+                    HV_EXIT_RECORD rec = g_Hv.ExitLog[slot];
+                    UINT64 dstVa = userBufVa + (UINT64)i * sizeof(HV_EXIT_RECORD);
+                    if (HvCopyPhysical(HvTranslateUserCtx, HvMoveIdentity, &callerCr3,
+                                       (UINT64)(UINTN)&rec, dstVa, sizeof(HV_EXIT_RECORD), TRUE) != HvCopyOk) {
+                        break;
+                    }
+                    count++;
+                }
+                result = count;
+            }
+            break;
+        }
+
         case HV_HYPERCALL_CAPABILITIES: {
-            UINT32 supported = (1U << HV_HYPERCALL_DETECT)        |
-                               (1U << HV_HYPERCALL_READ_PHYS)      |
-                               (1U << HV_HYPERCALL_WRITE_PHYS)     |
-                               (1U << HV_HYPERCALL_TRANSLATE)      |
-                               (1U << HV_HYPERCALL_GET_CR3)        |
-                               (1U << HV_HYPERCALL_UNLOAD)         |
-                               (1U << HV_HYPERCALL_QUERY_STATUS)   |
-                               (1U << HV_HYPERCALL_INVALIDATE_EPT) |
-                               (1U << HV_HYPERCALL_SELFTEST)       |
-                               (1U << HV_HYPERCALL_SET_CR3_OFFSET) |
-                               (1U << HV_HYPERCALL_READ_SCATTER)   |
-                               (1U << HV_HYPERCALL_CAPABILITIES)   |
-                               (1U << HV_HYPERCALL_QUERY_CPID_PAD) |
-                               (1U << HV_HYPERCALL_READ_VIRT)      |
-                               (1U << HV_HYPERCALL_WRITE_VIRT)     |
-                               (1U << HV_HYPERCALL_GET_KERNEL_BASE);
+            UINT32 supported = (1U << HV_HYPERCALL_DETECT)              |
+                               (1U << HV_HYPERCALL_READ_PHYS)            |
+                               (1U << HV_HYPERCALL_WRITE_PHYS)           |
+                               (1U << HV_HYPERCALL_TRANSLATE)            |
+                               (1U << HV_HYPERCALL_GET_CR3)              |
+                               (1U << HV_HYPERCALL_UNLOAD)               |
+                               (1U << HV_HYPERCALL_QUERY_STATUS)         |
+                               (1U << HV_HYPERCALL_INVALIDATE_EPT)       |
+                               (1U << HV_HYPERCALL_SELFTEST)             |
+                               (1U << HV_HYPERCALL_SET_CR3_OFFSET)       |
+                               (1U << HV_HYPERCALL_READ_SCATTER)         |
+                               (1U << HV_HYPERCALL_CAPABILITIES)         |
+                               (1U << HV_HYPERCALL_QUERY_CPID_PAD)       |
+                               (1U << HV_HYPERCALL_READ_VIRT)            |
+                               (1U << HV_HYPERCALL_WRITE_VIRT)           |
+                               (1U << HV_HYPERCALL_GET_KERNEL_BASE)      |
+                               (1U << HV_HYPERCALL_QUERY_EXIT_TELEMETRY) |
+                               (1U << HV_HYPERCALL_GET_TOKEN)            |
+                               (1U << HV_HYPERCALL_EPT_HOOK)             |
+                               (1U << HV_HYPERCALL_EPT_UNHOOK);
             result = (UINT64)HV_ABI_VERSION | ((UINT64)supported << 16);
             break;
         }

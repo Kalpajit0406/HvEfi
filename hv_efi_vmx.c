@@ -1,10 +1,10 @@
-﻿// hv_efi_vmx.c - VMX lifecycle using EFI Boot Services for allocation.
+// hv_efi_vmx.c - VMX lifecycle using EFI Boot Services for allocation.
 //
 // EFI equivalent of HvDrv/hv_vmx.c.  Uses AllocatePages instead of
 // MmAllocateContiguousMemory and identity mapping (VA == PA) throughout.
 
 #include "hv_efi.h"
-#include "shared/HvDrv/hv_msr_contract.h"
+#include "../HvDrv/hv_msr_contract.h"
 
 // ── Global VMX state ────────────────────────────────────────────────────────
 

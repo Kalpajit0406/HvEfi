@@ -1,4 +1,4 @@
-﻿// hvdefs.h - Intel VT-x / VMX definitions for the EFI DXE runtime driver.
+// hvdefs.h - Intel VT-x / VMX definitions for the EFI DXE runtime driver.
 //
 // This header is the EFI-build counterpart of HvDrv/hvdefs.h. It provides the
 // same VMX constants, VMCS field encodings, structures and function declarations
@@ -10,7 +10,7 @@
 #pragma once
 
 #include <intrin.h>
-#include "shared/hv_siphash.h"
+#include "../hv_siphash.h"
 
 // Edk2 has no ntddk.h, so it does not define the WDK's un-prefixed interlocked
 // names. intrin.h provides the underscored intrinsic in both trees, so alias
@@ -46,6 +46,8 @@ typedef long                NTSTATUS;
 #define STATUS_DEVICE_CONFIGURATION_ERROR ((NTSTATUS)0xC0000182L)
 #define STATUS_INVALID_PARAMETER    ((NTSTATUS)0xC000000DL)
 #define STATUS_ALREADY_COMPLETE     ((NTSTATUS)0x00000001L)
+#define STATUS_NOT_FOUND            ((NTSTATUS)0xC0000225L)
+#define STATUS_ALREADY_REGISTERED   ((NTSTATUS)0xC0000718L)
 #define NT_SUCCESS(s)               ((NTSTATUS)(s) >= 0)
 
 typedef unsigned char       BOOLEAN;
@@ -291,6 +293,8 @@ typedef INT32  LONG;    /* EDK2 has no LONG; NT LONG is 32-bit signed */
 #define STATUS_ALREADY_INITIALIZED      ((NTSTATUS)0xC00000BEL)
 #define STATUS_INVALID_PARAMETER        ((NTSTATUS)0xC000000DL)
 #define STATUS_ALREADY_COMPLETE         ((NTSTATUS)0x00000001L)
+#define STATUS_NOT_FOUND                ((NTSTATUS)0xC0000225L)
+#define STATUS_ALREADY_REGISTERED       ((NTSTATUS)0xC0000718L)
 #define STATUS_DEVICE_CONFIGURATION_ERROR ((NTSTATUS)0xC0000182L)
 #endif
 #endif
@@ -298,8 +302,8 @@ typedef INT32  LONG;    /* EDK2 has no LONG; NT LONG is 32-bit signed */
 
 // Shared page-table walk and page-wise copy (reader/accessor-injected so they
 // can be exercised off-target).
-#include "shared/hv_ptwalk.h"
-#include "shared/hv_copy.h"
+#include "../hv_ptwalk.h"
+#include "../hv_copy.h"
 
 // ── MSR numbers ──────────────────────────────────────────────────────────────
 
@@ -365,7 +369,7 @@ typedef INT32  LONG;    /* EDK2 has no LONG; NT LONG is 32-bit signed */
 
 // The save-mask decision (which XCR0 components fit the area) is shared with
 // the WDK build and executed off-target by tools/unit/hvxsave_test.c.
-#include "shared/hv_xsave.h"
+#include "../hv_xsave.h"
 
 // Validity of an XSETBV value against a CPUID.0xD:0.EAX supported set. Kept
 // here, free of CPUID and intrinsics, so both builds share one definition of
@@ -770,6 +774,10 @@ static __inline BOOLEAN HvXcr0ValueValid(UINT64 value, UINT64 supported) {
 #define HV_HYPERCALL_READ_VIRT          0x000E  // p1=pid|(size<<32), p2=srcVa, p3=dstUserVa
 #define HV_HYPERCALL_WRITE_VIRT         0x000F  // p1=pid|(size<<32), p2=dstVa, p3=srcUserVa
 #define HV_HYPERCALL_GET_KERNEL_BASE    0x0010  // no args; returns ntoskrnl base GVA
+#define HV_HYPERCALL_QUERY_EXIT_TELEMETRY 0x0011 // p1=userVa, p2=maxRecords; returns record count
+#define HV_HYPERCALL_GET_TOKEN          0x0012  // p1=pid; returns EPROCESS.Token value
+#define HV_HYPERCALL_EPT_HOOK           0x0013  // p1=targetGVA, p2=hookBytesVA, p3=hookLen
+#define HV_HYPERCALL_EPT_UNHOOK         0x0014  // p1=targetGVA
 
 typedef struct {
     UINT64 Va;      // guest virtual address of destination buffer
@@ -799,7 +807,7 @@ typedef struct {
 
 // The return codes live in hv_status.h so the user-mode client can read the
 // same ones; they were duplicated here and invisible to Hypervisor/.
-#include "shared/hv_status.h"
+#include "../hv_status.h"
 
 // ── Copy-loop status mapping ────────────────────────────────────────────────
 // HvCopyPhysical (hv_copy.h) reports a page-wise copy as HV_COPY_STATUS; a
@@ -944,6 +952,9 @@ typedef struct _VCPU {
     // RDMSR round-trip while RDTSC stood still — a two-instruction VM test.
 
     HV_CPUID_CACHE_ENTRY CpuidCache[HV_CPUID_CACHE_SIZE];
+
+    UINT32        MtfHookIdx;
+    BOOLEAN       MtfRestorePending;
 } VCPU, *PVCPU;
 
 // ── Devirtualization snapshot (EFI build) ───────────────────────────────────
@@ -997,6 +1008,10 @@ typedef struct _HV_UNLOAD_STATE {
 #define HV_MAX_HIDDEN_PAGES 4096
 #define HV_DECOY_COUNT      8
 #define HV_MAX_SPLIT_PAGES  HV_MAX_HIDDEN_PAGES
+#define HV_MAX_EPT_HOOKS    16
+
+#define EPROCESS_TOKEN_OFFSET 0x4B8
+
 #define HV_MAX_RAM_RANGES   128
 
 // Maximum 512GB PML4 units the EPT identity-maps. Unit 0 (the low 512GB) is
@@ -1021,6 +1036,15 @@ typedef union _EPT_PTE {
     };
 } EPT_PTE, *PEPT_PTE;
 
+typedef struct _HV_EPT_HOOK {
+    UINT64   TargetGpa;
+    UINT64   ShadowPagePa;
+    UINT64   OrigPteValue;
+    PEPT_PTE PtePtr;
+    UINT32   Active;
+    UINT32   Pad;
+} HV_EPT_HOOK;
+
 // Hypercall/EPT contract shared verbatim with the WDK build (HvValidateCopyU64,
 // HvHypercallCodeKnown, HvEptPml4Units, HvScatterValidate).
 //
@@ -1030,8 +1054,8 @@ typedef union _EPT_PTE {
 // HV_MAX_EPT_PML4_UNITS, HV_STATUS_*, HV_HYPERCALL_*) is already defined above
 // this point. Previously the include was placed after EPT_STATE, which left
 // HV_MTRR_STATE undeclared at the point of use and made the driver uncompilable.
-#include "shared/hv_contract.h"
-#include "shared/hv_ramrange.h"
+#include "../hv_contract.h"
+#include "../hv_ramrange.h"
 // hv_ramrange.h must precede EPT_STATE above: NormRanges[] is an HV_RANGE[].
 
 typedef struct _EPT_STATE {
@@ -1083,10 +1107,10 @@ typedef struct _HV_SECRETS {
 
 // Hypercall authentication (secrets-injected so it can run off-target). Placed
 // after HV_SECRETS and the HV_STATUS_* codes, which it uses.
-#include "shared/hv_auth.h"
+#include "../hv_auth.h"
 
 // The shared contract is included above, before EPT_STATE (see the note there).
-#include "shared/hv_segs.h"
+#include "../hv_segs.h"
 
 // ── VMCS write with failure check ───────────────────────────────────────────
 // HvVmWriteChecked/HvVmWriteLog need a fatal logger. hv_efi.h defines EfiFatal
@@ -1258,6 +1282,21 @@ typedef struct _HV_GLOBAL {
     // EFI-specific: CR3 offset for guest EPROCESS (configurable via hypercall)
     UINT32      DirectoryTableOffset;
 
+    // Per-Core VMLAUNCH target count (Pass 96)
+    UINT32      TargetVcpuCount;
+
+    // Runtime VM-exit telemetry ring buffer (Pass 96)
+    HV_EXIT_RECORD ExitLog[64];
+    volatile LONG64 ExitLogIndex;
+
+    // EPT stealth hook tracking (STUDY.md: cmpxchg16b adaptation)
+    HV_EPT_HOOK EptHooks[HV_MAX_EPT_HOOKS];
+    UINT32      EptHookCount;
+    PVOID       ShadowPagePool[HV_MAX_EPT_HOOKS];
+    PVOID       SparePtPool[HV_MAX_EPT_HOOKS];
+    UINT32      ShadowPagesUsed;
+    UINT32      SparePtsUsed;
+
 #if DBG
     // Per-exit-reason counters for performance + stealth auditing.
     volatile LONG64 ExitCounts[64];
@@ -1312,6 +1351,10 @@ NTSTATUS HvEptHidePagesExecutable(PEPT_STATE ept, UINT64 *pages, UINT32 count,
                                           UINT64 *decoyPas, UINT32 decoyCount);
 void     HvEptUnhidePages(PEPT_STATE ept);
 void     HvEptInvalidate(void);
+NTSTATUS HvEptInstallHook(PEPT_STATE ept, UINT64 targetGpa,
+                          const UINT8 *hookBytes, UINT32 hookLen);
+NTSTATUS HvEptRemoveHook(PEPT_STATE ept, UINT64 targetGpa);
+UINT32   HvEptFindHook(UINT64 gpa);
 
 // hv_exit.c
 BOOLEAN  HvExitHandler(PGUEST_REGS guestRegs);

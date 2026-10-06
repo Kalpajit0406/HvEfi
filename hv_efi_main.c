@@ -832,6 +832,20 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     EfiPrint("[+] Step 7: Decoy pages allocated\n");
     HvReportStage(HV_STAGE_DECOY_OK, 0);
 
+    // ── Step 7b: Pre-allocate EPT hook pools ────────────────────────────────
+    g_Hv.ShadowPagesUsed = 0;
+    g_Hv.SparePtsUsed = 0;
+    for (UINT32 i = 0; i < HV_MAX_EPT_HOOKS; i++) {
+        g_Hv.ShadowPagePool[i] = EfiAllocPagesBelow4G(1);
+        g_Hv.SparePtPool[i]    = EfiAllocPagesBelow4G(1);
+        if (!g_Hv.ShadowPagePool[i] || !g_Hv.SparePtPool[i]) {
+            EfiFatal("EPT hook pool allocation failed\n");
+            goto fail;
+        }
+        RtlZeroMemory(g_Hv.ShadowPagePool[i], PAGE_SIZE);
+        RtlZeroMemory(g_Hv.SparePtPool[i], PAGE_SIZE);
+    }
+
     // ── Step 8: Initialize VMX (allocate per-CPU state + EPT) ───────────────
     ns = HvVmxInitialize();
     if (!NT_SUCCESS(ns)) {
