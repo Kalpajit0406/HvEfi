@@ -84,6 +84,29 @@ PVCPU HvGetCurrentVcpu(void) {
     return &g_Hv.Vcpus[idx];
 }
 
+// ── Broadcast an EPT mutation to every processor ────────────────────────────
+//
+// The name is the contract the EPT layer asks for - "tell every processor".
+// The implementation is necessarily deferred, and that is the only correct
+// answer available here rather than a shortcut:
+//
+// A synchronous broadcast would have to execute INVEPT on each other logical
+// processor. Every one of them is executing the guest, i.e. it is in VMX
+// non-root, where INVEPT is #UD - it would fault the guest, not flush it. An
+// AP dispatched through StartupAllAPs lands in that same non-root context, and
+// it would be firmware code re-entered at an arbitrary point of the boot as
+// well. So nothing here can make another processor invalidate; each processor
+// has to do it at its own next VM exit, which is exactly what moving the
+// generation achieves. See the long note at the top of ../hv_ept_gen.h.
+//
+// Consequently this is a store and nothing else, which is what makes it safe to
+// call from HvEfiOnExitBootServices - the callback that is documented as
+// memory-stores-only because a firmware call from it can deadlock this machine
+// and reboot-loop it.
+void HvSmpBroadcastEptFlush(void) {
+    HvEptPublishMutation();
+}
+
 // ── Virtualize one CPU ──────────────────────────────────────────────────────
 
 static volatile LONG g_VmxonSuccess = 0;

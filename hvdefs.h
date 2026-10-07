@@ -80,7 +80,13 @@ typedef struct _PHYSICAL_MEMORY_RANGE {
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
 
 // Volatile interlocked ops — MSVC builtins
+//
+// InterlockedCompareExchange is what hv_hookpool.h's pool and split claims are
+// built from. It is the WDK spelling because that is the one name every build
+// path can reach: ntddk.h declares it in the WDK tree, the syntax gate's
+// ntddk.h stub maps it, and this alias covers EDK2, which has neither.
 #define InterlockedIncrement        _InterlockedIncrement
+#define InterlockedCompareExchange  _InterlockedCompareExchange
 #define InterlockedCompareExchange64 _InterlockedCompareExchange64
 
 // Debug output — no-op in EFI runtime (no console after ExitBootServices).
@@ -153,6 +159,7 @@ typedef UINT64 *PUINTN;
 /* MSVC intrinsics: the map below lives in the skipped _NTDDK_ block, so
  * repeat it here where EDK2 actually compiles. */
 #define InterlockedIncrement          _InterlockedIncrement
+#define InterlockedCompareExchange    _InterlockedCompareExchange
 #define InterlockedCompareExchange64  _InterlockedCompareExchange64
 
 /* GDT/IDT reads: __sgdt/__sidt are WDK-only intrinsics. Under EDK2, map them
@@ -953,7 +960,18 @@ typedef struct _VCPU {
 
     HV_CPUID_CACHE_ENTRY CpuidCache[HV_CPUID_CACHE_SIZE];
 
-    UINT32        MtfHookIdx;
+    // The EPT mutation generation this processor last invalidated for,
+    // compared against g_Hv.EptGeneration at every VM-exit entry. A processor
+    // that is behind is running with cached translations taken before an EPT
+    // change, and a VM exit is the only context in which it can put itself
+    // right - it is executing the guest (VMX non-root) at every other moment,
+    // and INVEPT there is #UD. See ../hv_ept_gen.h.
+    LONG          EptSeenGeneration;
+
+    // Epoch-tagged slot reference for the pending MTF restore (HvHookTagMake).
+    // An index on its own is not enough once slots are reusable - see
+    // ../hv_hookpool.h.
+    UINT64        MtfHookTag;
     BOOLEAN       MtfRestorePending;
 } VCPU, *PVCPU;
 
@@ -1041,6 +1059,15 @@ typedef struct _HV_EPT_HOOK {
     UINT64   ShadowPagePa;
     UINT64   OrigPteValue;
     PEPT_PTE PtePtr;
+    // The 2MB region this page sits in and the shadow-pool entry backing it,
+    // so removal can give both back without a search. RegionBase is what lets
+    // the last hook to leave a split region collapse it again.
+    UINT64   RegionBase;
+    UINT32   ShadowSlot;
+    // Install epoch, carried in the pending-MTF tag (HvHookTagMake) so a slot
+    // recycled by a later hook cannot be restored by the earlier one's
+    // single-step. See ../hv_hookpool.h.
+    UINT32   Epoch;
     UINT32   Active;
     UINT32   Pad;
 } HV_EPT_HOOK;
@@ -1092,6 +1119,14 @@ typedef struct _EPT_STATE {
     UINT64    SplitRegionBase[HV_MAX_SPLIT_PAGES];
     UINT64    SplitOriginalPd[HV_MAX_SPLIT_PAGES];
     UINT32    SplitCount;
+
+    // Region split claim: the tag (HvSplitRegionTag) of the region whose split
+    // is in flight, 0 when none is. It is what makes the split record appear
+    // exactly once per region when two processors both find the region still a
+    // large page - see the claim note in ../hv_hookpool.h. Cast to
+    // `volatile long *` at the call sites: EDK2's LONG is `int`, and the
+    // intrinsic is declared for `long`.
+    volatile LONG SplitClaim;
 } EPT_STATE, *PEPT_STATE;
 
 // ── Global hypervisor state ─────────────────────────────────────────────────
@@ -1289,13 +1324,30 @@ typedef struct _HV_GLOBAL {
     HV_EXIT_RECORD ExitLog[64];
     volatile LONG64 ExitLogIndex;
 
+    // EPT mutation generation: published before every EPT entry is modified,
+    // read by every processor at VM-exit entry. This is how a mapping change
+    // reaches the other logical processors - an IPI cannot, because they are
+    // in VMX non-root and INVEPT there is #UD. See ../hv_ept_gen.h for why
+    // this is 32 bits and why the increment must be atomic.
+    volatile LONG EptGeneration;
+
     // EPT stealth hook tracking (STUDY.md: cmpxchg16b adaptation)
+    //
+    // Occupancy is a MASK per pool, not a used-count. The first cut counted
+    // upwards and never came back down - removal cleared only the slot's Active
+    // flag - so the 16th install was the last this boot would ever do, however
+    // many of them had been uninstalled. A mask records WHICH entry is free,
+    // which is what makes install/uninstall cycles reuse them. Every decision
+    // taken over these masks is a pure function in ../hv_hookpool.h.
     HV_EPT_HOOK EptHooks[HV_MAX_EPT_HOOKS];
-    UINT32      EptHookCount;
+    UINT32      EptHookUsedMask;
     PVOID       ShadowPagePool[HV_MAX_EPT_HOOKS];
     PVOID       SparePtPool[HV_MAX_EPT_HOOKS];
-    UINT32      ShadowPagesUsed;
-    UINT32      SparePtsUsed;
+    UINT32      ShadowPageUsedMask;
+    UINT32      SparePtUsedMask;
+    // Monotonic install counter: stamped into the hook slot at install and into
+    // the pending-MTF tag, so a recycled slot is rejected rather than restored.
+    volatile LONG EptHookEpoch;
 
 #if DBG
     // Per-exit-reason counters for performance + stealth auditing.
@@ -1350,11 +1402,19 @@ NTSTATUS HvEptHidePages(PEPT_STATE ept, UINT64 *pages, UINT32 count,
 NTSTATUS HvEptHidePagesExecutable(PEPT_STATE ept, UINT64 *pages, UINT32 count,
                                           UINT64 *decoyPas, UINT32 decoyCount);
 void     HvEptUnhidePages(PEPT_STATE ept);
-void     HvEptInvalidate(void);
+void     HvEptInvalidate(void);   // publish + local flush (VMX root only)
+void     HvEptFlushLocal(void);   // local INVEPT only; no counter change
+void     HvEptPublishMutation(void);      // counter only; safe in non-root
+void     HvEptGenerationSync(PVCPU vcpu); // flush if behind; VM-exit entry
 NTSTATUS HvEptInstallHook(PEPT_STATE ept, UINT64 targetGpa,
                           const UINT8 *hookBytes, UINT32 hookLen);
 NTSTATUS HvEptRemoveHook(PEPT_STATE ept, UINT64 targetGpa);
 UINT32   HvEptFindHook(UINT64 gpa);
+// Return both pre-allocated hook pools (shadow pages and spare PT pages) to
+// the firmware. Idempotent, and safe to call on a path where the pools were
+// never allocated. Called from HvEptDestroy and from the driver's failure
+// funnel, because bring-up can fail between pool allocation and EPT setup.
+void     HvEptHookPoolsFree(void);
 
 // hv_exit.c
 BOOLEAN  HvExitHandler(PGUEST_REGS guestRegs);
@@ -1370,6 +1430,12 @@ struct _HV_SECRETS *GetSecretsPage(void);
 NTSTATUS HvSmpVirtualizeAllProcessors(void);
 void     HvSmpDevirtualizeAllProcessors(void);
 PVCPU    HvGetCurrentVcpu(void);
+// Publish an EPT mutation to every processor. Deferred by construction: it
+// moves the generation forward so each processor invalidates at its own next
+// VM exit. It does NOT dispatch anything to another processor - see the long
+// note at the top of ../hv_ept_gen.h for why that cannot be done safely, and
+// why attempting it is a freeze rather than a flush.
+void     HvSmpBroadcastEptFlush(void);
 
 // hv_asm.asm
 extern void HvAsmVmxEntry(void);

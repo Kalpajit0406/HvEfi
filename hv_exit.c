@@ -10,6 +10,8 @@
 // tools/unit/hv_ept_decision_test.c. Included here rather than duplicated so
 // the branch whose wrong answer is a hard hang exists exactly once.
 #include "../hv_ept_decision.h"
+#include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
+#include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
 
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
@@ -389,11 +391,16 @@ static BOOLEAN HandleEptViolation(PVCPU vcpu) {
 
   // EPT stealth hook: R/W on a hooked page → swap to original, enable MTF
   UINT32 hookIdx = HvEptFindHook(gpa);
-  if (hookIdx != 0xFFFFFFFFu && !(qual & 4)) {
+  if (hookIdx != HV_HOOK_SLOT_NONE && !(qual & 4)) {
     HV_EPT_HOOK *hook = &g_Hv.EptHooks[hookIdx];
+    // Live mutation, and the publish is the HvEptInvalidate() below - after the
+    // swap, never before it. See the INVARIANT note in ../hv_ept_gen.h.
     hook->PtePtr->Value = hook->OrigPteValue;
     HvEptInvalidate();
-    vcpu->MtfHookIdx = hookIdx;
+    // Tag the pending restore with this slot AND this occupancy's epoch, so a
+    // slot reused before the single-step arrives is refused rather than
+    // restored against the wrong hook. See ../hv_hookpool.h.
+    vcpu->MtfHookTag = HvHookTagMake(hookIdx, hook->Epoch);
     vcpu->MtfRestorePending = TRUE;
     SIZE_T procCtl = 0;
     __vmx_vmread(VMCS_PROC_BASED_CONTROLS, &procCtl);
@@ -696,6 +703,14 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   if (!vcpu)
     return HvDevirtualizeThisCpu(NULL, HV_DEVIRT_NO_VCPU);
 
+  // EPT coherence. This handler runs in VMX root, which is the only context in
+  // which this processor may invalidate its own cached EPT translations -
+  // everywhere else it is executing the guest, where INVEPT is #UD. Any
+  // mutation another processor published since our last exit is applied here,
+  // before any handler below looks at the EPT. Costs one load and one compare
+  // when nothing changed, and no INVEPT at all. See ../hv_ept_gen.h.
+  HvEptGenerationSync(vcpu);
+
   UINT64 exitReason = 0;
   __vmx_vmread(VMCS_EXIT_REASON, &exitReason);
   UINT32 reason = (UINT32)(exitReason & 0xFFFF);
@@ -960,13 +975,27 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
 
   case EXIT_REASON_MTF:
     if (vcpu && vcpu->MtfRestorePending) {
-      HV_EPT_HOOK *mtfHook = &g_Hv.EptHooks[vcpu->MtfHookIdx];
-      if (mtfHook->Active) {
-        mtfHook->PtePtr->PhysAddr = mtfHook->ShadowPagePa >> 12;
-        mtfHook->PtePtr->Read    = 0;
-        mtfHook->PtePtr->Write   = 0;
-        mtfHook->PtePtr->Execute = 1;
-        HvEptInvalidate();
+      // The pending single-step names a slot AND the install epoch it was armed
+      // for. Both halves are checked, because Active alone stopped being enough
+      // the moment slots became reusable: a slot released by an unhook and
+      // taken by the next hook is Active again, and restoring the PREVIOUS
+      // occupant's shadow page would rewrite this page's EPT entry to the wrong
+      // physical page. A mismatch is a rejection, not a restore - MTF is still
+      // switched off below, so a refused restore cannot single-step for ever.
+      UINT32 mtfSlot = HvHookTagSlot(vcpu->MtfHookTag);
+      if (mtfSlot < HV_MAX_EPT_HOOKS) {
+        HV_EPT_HOOK *mtfHook = &g_Hv.EptHooks[mtfSlot];
+        if (mtfHook->Active && mtfHook->PtePtr != NULL &&
+            HvHookTagMatches(vcpu->MtfHookTag, mtfSlot, mtfHook->Epoch)) {
+          // Live mutation. The publish is the HvEptInvalidate() below - after
+          // the restore, never before it; see the INVARIANT note in
+          // ../hv_ept_gen.h.
+          mtfHook->PtePtr->PhysAddr = mtfHook->ShadowPagePa >> 12;
+          mtfHook->PtePtr->Read    = 0;
+          mtfHook->PtePtr->Write   = 0;
+          mtfHook->PtePtr->Execute = 1;
+          HvEptInvalidate();
+        }
       }
       vcpu->MtfRestorePending = FALSE;
       SIZE_T procCtl = 0;

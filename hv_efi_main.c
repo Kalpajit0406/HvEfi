@@ -223,6 +223,13 @@ static VOID EFIAPI HvEfiOnExitBootServices(EFI_EVENT ev, VOID *ctx) {
     // returns success, which is the rescue-rule completion signal.
     HvMailboxSetFlag(g_Mailbox, HV_MAILBOX_FLAG_EBS_OK);
 
+    // Publish any EPT mutation so every processor invalidates at its own next
+    // VM exit - i.e. as Windows takes over. Store-only, which is why it is
+    // admissible in this callback at all; a broadcast INVEPT is not, because
+    // the other processors are in VMX non-root and this one may not call
+    // firmware here. See ../hv_ept_gen.h.
+    HvSmpBroadcastEptFlush();
+
     if (gEfiBS) {
         gEfiBS->SetWatchdogTimer(0, 0, 0, NULL);
     }
@@ -833,8 +840,13 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     HvReportStage(HV_STAGE_DECOY_OK, 0);
 
     // ── Step 7b: Pre-allocate EPT hook pools ────────────────────────────────
-    g_Hv.ShadowPagesUsed = 0;
-    g_Hv.SparePtsUsed = 0;
+    // Occupancy masks, not used-counters: install takes the lowest free entry
+    // and remove gives it back, so the pools stay reusable for the life of the
+    // boot instead of being consumed by the first 16 installs. See
+    // ../hv_hookpool.h for the decisions taken over them.
+    g_Hv.EptHookUsedMask = 0;
+    g_Hv.ShadowPageUsedMask = 0;
+    g_Hv.SparePtUsedMask = 0;
     for (UINT32 i = 0; i < HV_MAX_EPT_HOOKS; i++) {
         g_Hv.ShadowPagePool[i] = EfiAllocPagesBelow4G(1);
         g_Hv.SparePtPool[i]    = EfiAllocPagesBelow4G(1);
@@ -1112,6 +1124,11 @@ fail:
     // alloc) that bypass HvVmxShutdown. Idempotent — already NULL after
     // HvVmxShutdown ran above.
     HvDestroyHostPageTables();
+    // The EPT hook pools are allocated at Step 7b, so every failure from there
+    // on - including the pool allocation loop itself, which `goto fail`s on a
+    // partial result - would otherwise leak the pages already allocated.
+    // Idempotent, and a no-op before Step 7b.
+    HvEptHookPoolsFree();
     if (g_Hv.SecretsPageVa) {
         RtlSecureZeroMemory(g_Hv.SecretsPageVa, PAGE_SIZE);
         EfiFreePages(g_Hv.SecretsPageVa, 1);

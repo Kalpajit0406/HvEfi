@@ -7,6 +7,8 @@
 // regions get 4KB page tables.
 
 #include "hv_efi.h"
+#include "../hv_ept_gen.h"    // HvEptGenNext / HvEptGenNeedsFlush
+#include "../hv_hookpool.h"   // HvHookPool* / HvHookRegion* / HvHookTag*
 
 // ── RAM range helpers ───────────────────────────────────────────────────────
 // The RAM map is collected once by HvBuildHostPageTables and shared with the host
@@ -100,14 +102,26 @@ static void EptFillIdentityPtPage(PEPT_STATE ept, PEPT_PTE pt, UINT64 regionBase
 
 // origPd is the PD entry a split replaced (0 for an init-time mixed region),
 // so unhide can collapse the region back to its original large page.
-static void EptRecordPtPage(PEPT_STATE ept, PEPT_PTE ptVa, UINT64 regionBase,
-                            UINT64 origPd) {
-    if (ept->SplitCount < HV_MAX_SPLIT_PAGES) {
-        ept->SplitPages[ept->SplitCount]      = ptVa;
-        ept->SplitRegionBase[ept->SplitCount]  = regionBase;
-        ept->SplitOriginalPd[ept->SplitCount]  = origPd;
-        ept->SplitCount++;
-    }
+//
+// Exactly one record per region is enforced HERE, because this is the only
+// place a record is ever created. A second record for the same base is not a
+// bookkeeping nit: SplitCount would stop describing the table, and so would the
+// region reference count that HvHookRegionRefCount feeds - coalescing would
+// remove one record and free one PT page while the other record still named
+// that page. FALSE means the caller must give its PT page back and fail closed.
+static BOOLEAN EptRecordPtPage(PEPT_STATE ept, PEPT_PTE ptVa, UINT64 regionBase,
+                               UINT64 origPd) {
+    UINT32 existing = HvHookFindRegionIndex(regionBase, ept->SplitRegionBase,
+                                            ept->SplitCount);
+
+    if (!HvSplitRecordAllowed(existing, ept->SplitCount, HV_MAX_SPLIT_PAGES))
+        return FALSE;
+
+    ept->SplitPages[ept->SplitCount]      = ptVa;
+    ept->SplitRegionBase[ept->SplitCount]  = regionBase;
+    ept->SplitOriginalPd[ept->SplitCount]  = origPd;
+    ept->SplitCount++;
+    return TRUE;
 }
 
 static PEPT_PTE EptBuildMixedPtPage(PEPT_STATE ept, UINT64 regionBase) {
@@ -116,8 +130,117 @@ static PEPT_PTE EptBuildMixedPtPage(PEPT_STATE ept, UINT64 regionBase) {
     EptFillIdentityPtPage(ept, pt, regionBase);
     // origPd = 0: a mixed region was never a large page, so unhide leaves its
     // PD entry pointing at this PT page.
-    EptRecordPtPage(ept, pt, regionBase, 0);
+    if (!EptRecordPtPage(ept, pt, regionBase, 0)) {
+        EfiFreePages(pt, 1);
+        return NULL;
+    }
     return pt;
+}
+
+// ── Split-record lifecycle: one owner per undo step ─────────────────────
+//
+// Three callers undo a split - the hook path (the last hook leaving one
+// region), unhide (the whole table) and destroy (teardown). Each used to carry
+// its own copy of the loop, which is how the hook path came to leave its
+// regions split for good, and how a page owned by the spare-PT pool could be
+// freed from one path while the pool still held the pointer.
+
+// Give a PT page back to whichever pool owns it. A page taken from
+// g_Hv.SparePtPool goes back INTO that pool (the pool frees it at teardown);
+// one allocated at init for a mixed RAM region is allocator-owned and is freed
+// here. Freeing a pool page from here would leave the pool holding a dangling
+// pointer that the next split would hand out as a live PT page.
+static void EptReleasePtPage(PEPT_PTE pt) {
+    UINT32 poolSlot;
+
+    if (pt == NULL) return;
+
+    poolSlot = HvHookPoolFindPtr((const void *const *)g_Hv.SparePtPool,
+                                 HV_MAX_EPT_HOOKS, (const void *)pt);
+    RtlSecureZeroMemory(pt, PAGE_SIZE);
+
+    if (poolSlot != HV_HOOK_SLOT_NONE) {
+        // Atomic: this runs from the live coalesce path, so a concurrent
+        // EptRuntimeSplit claiming a DIFFERENT spare entry would otherwise have
+        // its claim lost by a read-modify-write here - and that entry would stay
+        // marked used, with its page unreachable, for the rest of the boot.
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.SparePtUsedMask,
+                                poolSlot);
+        return;   // the pool still owns it
+    }
+    EfiFreePages(pt, 1);
+}
+
+// Drop a split record without touching its page (the caller has already
+// released the page, or is about to). Swap with the last so the array stays
+// dense: unhide and destroy both walk [0, SplitCount).
+static void EptRemoveSplitRecord(PEPT_STATE ept, UINT32 i) {
+    UINT32 last;
+
+    if (i >= ept->SplitCount) return;
+    last = ept->SplitCount - 1;
+
+    ept->SplitPages[i]      = ept->SplitPages[last];
+    ept->SplitRegionBase[i] = ept->SplitRegionBase[last];
+    ept->SplitOriginalPd[i] = ept->SplitOriginalPd[last];
+
+    ept->SplitPages[last]      = NULL;
+    ept->SplitRegionBase[last] = 0;
+    ept->SplitOriginalPd[last] = 0;
+    ept->SplitCount = last;
+}
+
+// Collapse one region back to the original large-page PD entry and hand its PT
+// page back. Only legal when no hook still lives in the region - see
+// HvHookRegionShouldCoalesce in ../hv_hookpool.h.
+static void EptCoalesceRegion(PEPT_STATE ept, UINT32 i) {
+    UINT64 regionBase = ept->SplitRegionBase[i];
+    UINT64 origPd     = ept->SplitOriginalPd[i];
+    UINT32 g          = (UINT32)(regionBase >> EPT_PDPT_SHIFT);
+    PEPT_PTE pt       = ept->SplitPages[i];
+
+    if (g < ept->PdptCount && ept->PdptPages[g] != NULL) {
+        UINT32 pdIdx = (UINT32)((regionBase >> EPT_PD_SHIFT) & EPT_ENTRY_MASK);
+        ept->PdptPages[g][pdIdx].Value = origPd;
+    }
+
+    EptReleasePtPage(pt);
+    EptRemoveSplitRecord(ept, i);
+
+    // The claim is NOT released here. The caller owns it for the whole operation
+    // (see the contract note on HvEptRemoveHook): releasing it here would let the
+    // next processor claim the region while this one is still finishing, which is
+    // the window that lets a leaf write land in a page already handed back.
+}
+
+// Forget every hook without restoring any EPT entry: the callers here are
+// rebuilding or tearing the table down wholesale, so the entries are about to
+// be replaced anyway. A pending MTF restore is deliberately left to fail its
+// own checks in the exit handler - Active is 0 and the slot's epoch is stale,
+// which is exactly the rejection those checks exist for.
+static void EptDropAllHooks(void) {
+    UINT32 i;
+    for (i = 0; i < HV_MAX_EPT_HOOKS; i++) {
+        g_Hv.EptHooks[i].Active = 0;
+        g_Hv.EptHooks[i].PtePtr = NULL;
+    }
+    g_Hv.EptHookUsedMask = 0;
+}
+
+// How many live hooks name this region. The pure counter in ../hv_hookpool.h
+// takes a plain array, so one is rebuilt here from the live records on every
+// call: there is no second copy of the state that could fall out of step.
+// Slots whose mask bit is clear are skipped by the counter, so a base left
+// behind in a freed slot cannot contribute.
+static UINT32 EptLiveRegionRefs(UINT64 regionBase) {
+    UINT64 bases[HV_MAX_EPT_HOOKS];
+    UINT32 i;
+
+    for (i = 0; i < HV_MAX_EPT_HOOKS; i++)
+        bases[i] = g_Hv.EptHooks[i].RegionBase;
+
+    return HvHookRegionRefCount(bases, g_Hv.EptHookUsedMask, regionBase,
+                                HV_MAX_EPT_HOOKS);
 }
 
 // ── RAM range collection from EFI GetMemoryMap ──────────────────────────────
@@ -294,17 +417,22 @@ void HvEptDestroy(PEPT_STATE ept) {
     // PD/PDPT pages together map every hidden physical page, and EFI-freed
     // memory is reused by the OS after boot — leave zeros behind, not the
     // layout.
+    // The hook pools go first, and the order is load-bearing: a split record can
+    // name a spare-PT-pool page, so freeing the pool while such a record stands
+    // would free the same page twice - once from the pool, once from the sweep
+    // below. HvEptHookPoolsFree() unlinks those records before it frees
+    // anything. Without this call the pools leaked for the life of the boot.
+    HvEptHookPoolsFree();
+
     for (UINT32 i = 0; i < ept->SplitCount; i++) {
-        if (ept->SplitPages[i]) {
-            RtlSecureZeroMemory(ept->SplitPages[i], PAGE_SIZE);
-            EfiFreePages(ept->SplitPages[i], 1);
-        }
+        EptReleasePtPage(ept->SplitPages[i]);
     }
     RtlSecureZeroMemory(ept->SplitRegionBase,
                         sizeof(ept->SplitRegionBase[0]) * ept->SplitCount);
     RtlSecureZeroMemory(ept->SplitOriginalPd,
                         sizeof(ept->SplitOriginalPd[0]) * ept->SplitCount);
     ept->SplitCount = 0;
+    ept->SplitClaim = 0;
 
     if (ept->PdptPages) {
         for (UINT32 i = 0; i < ept->PdptCount; i++) {
@@ -436,7 +564,13 @@ static NTSTATUS EptSplitLargePage(PEPT_STATE ept, PEPT_PTE pdEntry, UINT64 regio
         pt[i].PhysAddr   = pa >> 12;
     }
 
-    EptRecordPtPage(ept, pt, regionBase, origPd);
+    if (!EptRecordPtPage(ept, pt, regionBase, origPd)) {
+        // A record for this region already exists, and this function's contract
+        // is "split AND record". Fail closed rather than leave a second record,
+        // or a PT page the table does not know about, behind.
+        EfiFreePages(pt, 1);
+        return STATUS_UNSUCCESSFUL;
+    }
 
     pdEntry->Value = 0;
     pdEntry->Read    = 1;
@@ -449,8 +583,18 @@ static NTSTATUS EptSplitLargePage(PEPT_STATE ept, PEPT_PTE pdEntry, UINT64 regio
 }
 
 // ── EPT Invalidate ──────────────────────────────────────────────────────────
+//
+// Four entry points. What separates them is WHICH processor they fix and
+// whether they are allowed outside VMX root. ../hv_ept_gen.h carries the full
+// reasoning; the one-line version is that INVEPT is local to the executing
+// logical processor, a remote processor is in VMX non-root where INVEPT is
+// #UD, and a VM exit is therefore the only context in which a processor can
+// invalidate itself.
 
-void HvEptInvalidate(void) {
+// The raw operation: invalidate this processor's cached EPT translations. No
+// counter traffic, so a caller that must not touch the generation (a teardown
+// path, or a re-flush after one already published) can still use it.
+void HvEptFlushLocal(void) {
     struct { UINT64 eptp; UINT64 gpa; } desc;
     desc.eptp = g_Hv.Ept.EptPointer;
     desc.gpa  = 0;
@@ -459,6 +603,52 @@ void HvEptInvalidate(void) {
         struct { UINT64 vpid; UINT64 addr; } vdesc = {0, 0};
         HvAsmInvvpid(INVVPID_ALL_CONTEXTS, &vdesc);
     }
+}
+
+// Publish a mutation WITHOUT invalidating. This must be called before the first
+// EPT entry is modified, not after the last one: a processor that takes its exit
+// inside the window between the entry write and the publication reads the old
+// generation, concludes it is up to date, and keeps its pre-change translation
+// for the rest of the boot. Its staleness would be unbounded rather than one
+// exit - the INVARIANT note in ../hv_ept_gen.h.
+//
+// Safe in VMX non-root: it is a store and nothing else. HvEfiOnExitBootServices
+// is the caller that depends on that.
+void HvEptPublishMutation(void) {
+    // Atomic. Two processors can publish at once - a hypercall on one, the MTF
+    // restore for a hook hit on another - and a read-modify-write that lost one
+    // update would leave a mutation that really happened unpublished, which is
+    // unbounded staleness rather than one exit. _InterlockedIncrement is the
+    // spelling this tree already uses outside #if DBG (hv_efi_smp.c).
+    _InterlockedIncrement((volatile long *)&g_Hv.EptGeneration);
+}
+
+// Called at the top of HvExitHandler: this processor is in root, so this is
+// where a published mutation reaches it. One load and one compare on the exit
+// path; no INVEPT unless something actually changed.
+void HvEptGenerationSync(PVCPU vcpu) {
+    LONG current = g_Hv.EptGeneration;
+    if (!HvEptGenNeedsFlush(vcpu->EptSeenGeneration, current)) return;
+    HvEptFlushLocal();
+    vcpu->EptSeenGeneration = current;
+}
+
+// Publish and fix THIS processor immediately. Every caller reaches here in VMX
+// root (the hypercall path, bring-up, teardown), so the local flush is valid;
+// the other processors follow at their next VM exit. This replaced a bare
+// local flush - correct only while every mutation happened before VMLAUNCH,
+// when there was no other processor to hold a stale translation.
+void HvEptInvalidate(void) {
+    PVCPU vcpu;
+    LONG current;
+
+    HvEptPublishMutation();
+    current = g_Hv.EptGeneration;
+
+    HvEptFlushLocal();
+
+    vcpu = HvGetCurrentVcpu();
+    if (vcpu) vcpu->EptSeenGeneration = current;
 }
 
 // ── Decoy index (RDRAND-based randomisation) ────────────────────────────────
@@ -591,6 +781,12 @@ NTSTATUS HvEptHidePagesExecutable(PEPT_STATE ept, UINT64 *pages, UINT32 count,
 // ── EPT Unhide Pages ────────────────────────────────────────────────────────
 
 void HvEptUnhidePages(PEPT_STATE ept) {
+    // Rebuilding every split region wholesale invalidates any hook that lived in
+    // one: its saved PtePtr is aimed into a PT page this loop is about to hand
+    // back. Drop the hooks rather than leave a restore path pointing at memory
+    // the pool can reissue.
+    EptDropAllHooks();
+
     for (UINT32 i = 0; i < ept->SplitCount; i++) {
         if (!ept->SplitPages[i]) continue;
 
@@ -611,32 +807,61 @@ void HvEptUnhidePages(PEPT_STATE ept) {
                 }
             }
         }
-        // Teardown path: EPT must not be live after this returns.
-        RtlSecureZeroMemory(ept->SplitPages[i], PAGE_SIZE);
-        EfiFreePages(ept->SplitPages[i], 1);
+        // Teardown path: EPT must not be live after this returns. The page goes
+        // back to whichever pool owns it - freeing a spare PT page here would
+        // leave the pool pointing at freed memory.
+        EptReleasePtPage(ept->SplitPages[i]);
         ept->SplitPages[i] = NULL;
     }
     SetMem(ept->SplitRegionBase, ept->SplitCount * sizeof(ept->SplitRegionBase[0]), 0);
     SetMem(ept->SplitOriginalPd, ept->SplitCount * sizeof(ept->SplitOriginalPd[0]), 0);
     ept->SplitCount = 0;
+    // Every region is back to a large page, so no split is in flight and the
+    // claim word must not keep naming one.
+    ept->SplitClaim = 0;
 }
 
 // ── EPT stealth hook support ────────────────────────────────────────────────
 // Split-view EPT: shadow page has hooked code (X-only), original page is
 // shown on reads (RW, no X). MTF single-steps the transition back.
 
+// Split one 2MB region for a stealth hook, and record it EXACTLY once.
+//
+// Two processors that both find the region still a large page would otherwise
+// each take a spare PT page, each append a record for the SAME region and each
+// rewrite the same PD entry. The duplicate record is the damaging part: it
+// makes SplitCount, and therefore the region reference count, stop describing
+// the table.
+//
+// CONTRACT: the caller already holds this region's split claim (HvSplitClaimTake
+// succeeded) and releases it. The claim is deliberately owned by the caller
+// rather than taken here, because the hook being installed goes into a leaf of
+// the very PT page this split creates, and that leaf must stay protected until
+// the hook is committed - see the note in ../hv_hookpool.h. This function then
+// has exactly one processor to itself, and so does the record it appends.
 static NTSTATUS EptRuntimeSplit(PEPT_STATE ept, PEPT_PTE pdEntry,
                                 UINT64 regionBase) {
+    UINT32 poolSlot;
+    PEPT_PTE pt;
+    UINT64 origMemType, origIgnorePat, origPd;
+
     if (!pdEntry->LargePage) return STATUS_SUCCESS;
     if (ept->SplitCount >= HV_MAX_SPLIT_PAGES) return STATUS_INSUFFICIENT_RESOURCES;
-    if (g_Hv.SparePtsUsed >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
 
-    PEPT_PTE pt = (PEPT_PTE)g_Hv.SparePtPool[g_Hv.SparePtsUsed++];
-    if (!pt) return STATUS_INSUFFICIENT_RESOURCES;
+    // Every failure from here is a pool problem, and the caller owns the claim.
+    pt = NULL;
+    poolSlot = HvHookPoolClaim((volatile long *)&g_Hv.SparePtUsedMask,
+                               HV_MAX_EPT_HOOKS);
+    if (poolSlot != HV_HOOK_SLOT_NONE)
+        pt = (PEPT_PTE)g_Hv.SparePtPool[poolSlot];
+    if (pt == NULL) goto fail;
+    // The entry was claimed atomically above, so it is already marked used, and
+    // it is handed back when the region is coalesced (EptReleasePtPage): a
+    // region that is split and later collapsed leaves the pool as it found it.
 
-    UINT64 origMemType = pdEntry->MemoryType;
-    UINT64 origIgnorePat = pdEntry->IgnorePat;
-    UINT64 origPd = pdEntry->Value;
+    origMemType = pdEntry->MemoryType;
+    origIgnorePat = pdEntry->IgnorePat;
+    origPd = pdEntry->Value;
 
     for (UINT32 i = 0; i < 512; i++) {
         UINT64 pa = regionBase + (UINT64)i * PAGE_SIZE;
@@ -649,7 +874,12 @@ static NTSTATUS EptRuntimeSplit(PEPT_STATE ept, PEPT_PTE pdEntry,
         pt[i].PhysAddr   = pa >> 12;
     }
 
-    EptRecordPtPage(ept, pt, regionBase, origPd);
+    // Belt and braces. With the claim held this cannot find an existing record -
+    // the caller only gets here while the region is still a large page, and a
+    // split region has no large page - but a second record for one region is
+    // exactly the state this path must never produce, so it is refused rather
+    // than assumed impossible.
+    if (!EptRecordPtPage(ept, pt, regionBase, origPd)) goto fail;
 
     pdEntry->Value = 0;
     pdEntry->Read    = 1;
@@ -658,80 +888,324 @@ static NTSTATUS EptRuntimeSplit(PEPT_STATE ept, PEPT_PTE pdEntry,
     pdEntry->PhysAddr = EfiVaToPA(pt) >> 12;
 
     return STATUS_SUCCESS;
+
+fail:
+    if (poolSlot != HV_HOOK_SLOT_NONE)
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.SparePtUsedMask,
+                                poolSlot);
+    return STATUS_INSUFFICIENT_RESOURCES;
 }
 
 UINT32 HvEptFindHook(UINT64 gpa) {
     UINT64 page = gpa & ~0xFFFULL;
-    for (UINT32 i = 0; i < g_Hv.EptHookCount; i++) {
+    // Every slot, not the first N: slots are reused now, so the installed hooks
+    // are the set of Active slots rather than a prefix of the array.
+    for (UINT32 i = 0; i < HV_MAX_EPT_HOOKS; i++) {
         if (g_Hv.EptHooks[i].Active && g_Hv.EptHooks[i].TargetGpa == page)
             return i;
     }
-    return 0xFFFFFFFFu;
+    return HV_HOOK_SLOT_NONE;
 }
 
 NTSTATUS HvEptInstallHook(PEPT_STATE ept, UINT64 targetGpa,
                           const UINT8 *hookBytes, UINT32 hookLen) {
-    if (g_Hv.EptHookCount >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
-    if (g_Hv.ShadowPagesUsed >= HV_MAX_EPT_HOOKS) return STATUS_INSUFFICIENT_RESOURCES;
+    UINT32 slot, shadowSlot, splitIdx, decision, regionTag;
+    PVOID  shadow;
+    UINT64 pageGpa, offset, regionBase, pml4i, pdpti, pdi, pti;
+    PEPT_PTE pdpt, pd, pt, pte;
+    // STATUS_INVALID_PARAMETER is the default because the EPT-walk refusals
+    // below are exactly that; the resource paths set their own status.
+    NTSTATUS status = STATUS_INVALID_PARAMETER;
+    BOOLEAN claimHeld = FALSE;
 
-    UINT64 pageGpa = targetGpa & ~0xFFFULL;
-    UINT32 offset  = (UINT32)(targetGpa & 0xFFF);
-    if ((UINT64)offset + hookLen > PAGE_SIZE) return STATUS_INVALID_PARAMETER;
+    slot = HV_HOOK_SLOT_NONE;
+    shadowSlot = HV_HOOK_SLOT_NONE;
 
-    if (HvEptFindHook(pageGpa) != 0xFFFFFFFFu)
+    pageGpa = targetGpa & ~0xFFFULL;
+    offset  = targetGpa & 0xFFF;
+    if (offset + hookLen > PAGE_SIZE) return STATUS_INVALID_PARAMETER;
+
+    if (HvEptFindHook(pageGpa) != HV_HOOK_SLOT_NONE)
         return STATUS_ALREADY_REGISTERED;
 
-    UINT64 regionBase = pageGpa & ~((1ULL << EPT_PD_SHIFT) - 1);
-    UINT64 pml4i = (pageGpa >> EPT_PML4_SHIFT) & EPT_ENTRY_MASK;
-    UINT64 pdpti = (pageGpa >> EPT_PDPT_SHIFT) & EPT_ENTRY_MASK;
-    UINT64 pdi   = (pageGpa >> EPT_PD_SHIFT)   & EPT_ENTRY_MASK;
-    UINT64 pti   = (pageGpa >> EPT_PT_SHIFT)   & EPT_ENTRY_MASK;
-
-    if (!ept->Pml4[pml4i].Read) return STATUS_INVALID_PARAMETER;
-    PEPT_PTE pdpt = (PEPT_PTE)EfiPaToVa(ept->Pml4[pml4i].PhysAddr << 12);
-    if (!pdpt[pdpti].Read || pdpt[pdpti].LargePage) return STATUS_INVALID_PARAMETER;
-    PEPT_PTE pd = (PEPT_PTE)EfiPaToVa(pdpt[pdpti].PhysAddr << 12);
-
-    if (pd[pdi].LargePage) {
-        NTSTATUS ns = EptRuntimeSplit(ept, &pd[pdi], regionBase);
-        if (!NT_SUCCESS(ns)) return ns;
+    // CLAIM both pool entries up front, and atomically. HvHookPoolClaim() reads
+    // and writes the mask in ONE step, so two processors installing at the same
+    // instant cannot come away with the same slot, or copy their hook bytes
+    // into the same shadow page. The read-then-write this replaced could do
+    // both, and one of the two hooks was then silently lost while every counter
+    // still looked consistent.
+    //
+    // Pool entries are claimed before the region, and the region claim is taken
+    // further down (it needs regionBase). Both are released by `fail`, so the
+    // order does not matter for correctness - only that neither is held while
+    // waiting for anything, which it never is.
+    //
+    // A claim is a claim, so every return below has to give the entries back;
+    // they all funnel through `fail`. That is also what keeps install/remove
+    // cycles repeatable - the original version consumed a slot and a shadow
+    // page on the way in and gave neither of them back at all.
+    slot = HvHookPoolClaim((volatile long *)&g_Hv.EptHookUsedMask,
+                           HV_MAX_EPT_HOOKS);
+    if (slot == HV_HOOK_SLOT_NONE) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
     }
 
-    PEPT_PTE pt = (PEPT_PTE)EfiPaToVa(pd[pdi].PhysAddr << 12);
-    PEPT_PTE pte = &pt[pti];
+    shadowSlot = HvHookPoolClaim((volatile long *)&g_Hv.ShadowPageUsedMask,
+                                 HV_MAX_EPT_HOOKS);
+    if (shadowSlot == HV_HOOK_SLOT_NONE) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
+    }
 
-    PVOID shadow = g_Hv.ShadowPagePool[g_Hv.ShadowPagesUsed++];
-    if (!shadow) return STATUS_INSUFFICIENT_RESOURCES;
+    shadow = g_Hv.ShadowPagePool[shadowSlot];
+    if (shadow == NULL) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
+    }
+
+    // Mutate first, publish afterwards: the HvEptInvalidate() at the end of
+    // this function is the publish. That order is a correctness requirement
+    // rather than a style choice - a processor that took its exit between a
+    // publish and this mutation would flush, re-walk the unchanged table,
+    // cache the pre-hook mapping, and record the new generation as seen, so
+    // nothing would ever invalidate it again. See the INVARIANT note in
+    // ../hv_ept_gen.h.
+    regionBase = pageGpa & ~((1ULL << EPT_PD_SHIFT) - 1);
+    regionTag  = HvSplitRegionTag(regionBase);
+    pml4i = (pageGpa >> EPT_PML4_SHIFT) & EPT_ENTRY_MASK;
+    pdpti = (pageGpa >> EPT_PDPT_SHIFT) & EPT_ENTRY_MASK;
+    pdi   = (pageGpa >> EPT_PD_SHIFT)   & EPT_ENTRY_MASK;
+    pti   = (pageGpa >> EPT_PT_SHIFT)   & EPT_ENTRY_MASK;
+
+    if (!ept->Pml4[pml4i].Read) goto fail;
+    pdpt = (PEPT_PTE)EfiPaToVa(ept->Pml4[pml4i].PhysAddr << 12);
+    if (!pdpt[pdpti].Read || pdpt[pdpti].LargePage) goto fail;
+    pd = (PEPT_PTE)EfiPaToVa(pdpt[pdpti].PhysAddr << 12);
+
+    // ── Take the region claim, and hold it until the hook is committed.
+    //
+    // The leaf this hook goes into lives in the region's PT page, and the last
+    // unhook in the region hands that page back to the spare pool. Writing the
+    // leaf without holding the claim is therefore a write into a page that may
+    // already be free - and it would land inside a page about to be reissued as
+    // some other region's PT, i.e. a wrong EPT leaf, which is a guest #PF the
+    // guest cannot fix. So the claim covers the whole operation, not just the
+    // split.
+    //
+    // The decision table is the shared one: a taken claim refuses every action
+    // on the region, with the tag saying whether it is this region or another.
+    // Losing is a bounded, retryable refusal and never a wait.
+    splitIdx = HvHookFindRegionIndex(regionBase, ept->SplitRegionBase,
+                                     ept->SplitCount);
+    decision = HvSplitDecide(splitIdx, ept->SplitCount, HV_MAX_SPLIT_PAGES,
+                             (unsigned int)ept->SplitClaim, regionTag);
+    if (decision == HV_SPLIT_EXHAUSTED) {
+        // No record and no room to make one: this region can never be split, so
+        // it cannot be hooked at a 4KB granularity at all.
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
+    }
+    if (decision != HV_SPLIT_DO && decision != HV_SPLIT_REUSE) {
+        status = STATUS_INSUFFICIENT_RESOURCES;   // another processor owns it
+        goto fail;
+    }
+    // The decision is an observation, so it has to be applied atomically; the
+    // compare-exchange is what makes it a claim rather than a stale reading.
+    if (!HvSplitClaimTake((volatile long *)&ept->SplitClaim, regionTag)) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto fail;
+    }
+    claimHeld = TRUE;
+
+    if (decision == HV_SPLIT_DO) {
+        status = EptRuntimeSplit(ept, &pd[pdi], regionBase);
+        if (!NT_SUCCESS(status)) goto fail;
+        // A split replaced the PD entry, so re-derive the PT page from it.
+        // Nothing can change it now: this processor holds the claim.
+    } else if (pd[pdi].LargePage) {
+        // HV_SPLIT_REUSE with the region still a large page: the split table and
+        // the EPT disagree about whether this region is split. EptRecordPtPage
+        // refuses a duplicate, so this is unreachable by construction - but
+        // treating a 2MB leaf as a PT pointer would write a leaf into whatever
+        // page it names, so it fails closed rather than trusting that.
+        status = STATUS_UNSUCCESSFUL;
+        goto fail;
+    }
+
+    pt  = (PEPT_PTE)EfiPaToVa(pd[pdi].PhysAddr << 12);
+    pte = &pt[pti];
 
     RtlCopyMemory(shadow, (PVOID)(UINTN)pageGpa, PAGE_SIZE);
     RtlCopyMemory((UINT8 *)shadow + offset, hookBytes, hookLen);
 
-    UINT32 idx = g_Hv.EptHookCount++;
-    g_Hv.EptHooks[idx].TargetGpa    = pageGpa;
-    g_Hv.EptHooks[idx].ShadowPagePa = EfiVaToPA(shadow);
-    g_Hv.EptHooks[idx].OrigPteValue = pte->Value;
-    g_Hv.EptHooks[idx].PtePtr       = pte;
-    g_Hv.EptHooks[idx].Active       = 1;
+    // ── Commit. Nothing below can fail, and both pool entries are already
+    // marked: the claim above is what marked them.
+    // A fresh epoch stamps this occupancy of the slot: a pending MTF restore
+    // from a previous occupant carries that occupant's epoch and is refused by
+    // HvHookTagMatches in the exit handler rather than rewriting this page.
+    _InterlockedIncrement((volatile long *)&g_Hv.EptHookEpoch);
 
-    pte->PhysAddr = g_Hv.EptHooks[idx].ShadowPagePa >> 12;
+    HV_EPT_HOOK *rec = &g_Hv.EptHooks[slot];
+    rec->TargetGpa    = pageGpa;
+    rec->ShadowPagePa = EfiVaToPA(shadow);
+    rec->OrigPteValue = pte->Value;
+    rec->PtePtr       = pte;
+    rec->RegionBase   = regionBase;
+    rec->ShadowSlot   = shadowSlot;
+    rec->Epoch        = (UINT32)g_Hv.EptHookEpoch;
+    rec->Active       = 1;
+
+    pte->PhysAddr = rec->ShadowPagePa >> 12;
     pte->Read    = 0;
     pte->Write   = 0;
     pte->Execute = 1;
 
     HvEptInvalidate();
+    // Released last, and only now: until the hook is committed the region's PT
+    // page must stay protected from a coalesce in another processor.
+    HvSplitClaimRelease((volatile long *)&ept->SplitClaim);
     return STATUS_SUCCESS;
+
+fail:
+    // Hand every claim back. HvHookPoolReleaseAtomic() ignores a slot past the
+    // mask width, so an entry that was never claimed (HV_HOOK_SLOT_NONE) is a
+    // no-op rather than a second, unrelated bit.
+    if (claimHeld)
+        HvSplitClaimRelease((volatile long *)&ept->SplitClaim);
+    if (slot != HV_HOOK_SLOT_NONE)
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.EptHookUsedMask, slot);
+    if (shadowSlot != HV_HOOK_SLOT_NONE)
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.ShadowPageUsedMask,
+                                shadowSlot);
+    return status;
 }
 
 NTSTATUS HvEptRemoveHook(PEPT_STATE ept, UINT64 targetGpa) {
-    UNREFERENCED_PARAMETER(ept);
     UINT64 pageGpa = targetGpa & ~0xFFFULL;
     UINT32 idx = HvEptFindHook(pageGpa);
-    if (idx == 0xFFFFFFFFu) return STATUS_NOT_FOUND;
+    UINT32 splitIdx, refsAfter, regionTag;
+    UINT64 regionBase;
+    HV_EPT_HOOK *hook;
 
-    HV_EPT_HOOK *hook = &g_Hv.EptHooks[idx];
+    if (idx == HV_HOOK_SLOT_NONE) return STATUS_NOT_FOUND;
+
+    hook = &g_Hv.EptHooks[idx];
+    regionBase = hook->RegionBase;
+
+    // CONTRACT: the region claim is held from before the first write until the
+    // whole removal - including the coalesce - is done, and it is released at
+    // the end of this function. That is what stops two unhooks in one region
+    // interleaving: without it, this processor could write hook->PtePtr after
+    // the other one had already handed that PT page back to the pool, leaving a
+    // stale large-page entry inside a page about to be reissued as some other
+    // region's PT. Losing the claim is a bounded, retryable refusal, never a
+    // wait for the other processor to finish.
+    regionTag = HvSplitRegionTag(regionBase);
+    if (!HvSplitClaimTake((volatile long *)&ept->SplitClaim, regionTag))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    // Counted before the release below, so this includes the hook being
+    // removed; HvHookRegionRefAfterRemoval is the saturating decrement.
+    refsAfter = HvHookRegionRefAfterRemoval(EptLiveRegionRefs(regionBase));
+
+    // Same ordering rule as install: restore the entry, then publish (the
+    // HvEptInvalidate() below). Publishing first would let a peer flush against
+    // the still-shadowed table and record the new generation. See the
+    // INVARIANT note in ../hv_ept_gen.h.
     hook->PtePtr->Value = hook->OrigPteValue;
     hook->Active = 0;
+    hook->PtePtr = NULL;
+
+    // Both pool entries go back. Clearing Active first means a pending MTF
+    // restore anywhere is already refused by the Active test; the epoch tag is
+    // what refuses it after this slot has been REUSED by the next hook.
+    //
+    // Released atomically: two processors removing different hooks at once would
+    // otherwise each write back a mask read before the other's release, and one
+    // of the two slots would stay marked used for the life of the boot.
+    HvHookPoolReleaseAtomic((volatile long *)&g_Hv.EptHookUsedMask, idx);
+    if (hook->ShadowSlot < HV_MAX_EPT_HOOKS)
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.ShadowPageUsedMask,
+                                hook->ShadowSlot);
+
+    // Collapse the region only when no hook still shadows a page in it: until
+    // then the 512 4KB leaves must stay, because a sibling hook's saved PtePtr
+    // points into that PT page. HvHookRegionShouldCoalesce also refuses a region
+    // that was split at init for a RAM boundary - it was never a large page, so
+    // there is no large-page entry to restore.
+    splitIdx = HvHookFindRegionIndex(regionBase, ept->SplitRegionBase,
+                                     ept->SplitCount);
+    if (splitIdx != HV_HOOK_SLOT_NONE &&
+        HvHookRegionShouldCoalesce(refsAfter, ept->SplitOriginalPd[splitIdx])) {
+        EptCoalesceRegion(ept, splitIdx);
+    }
 
     HvEptInvalidate();
+    // Last, so that everything above - the restore, the pool releases and any
+    // coalesce - happened while this processor owned the region.
+    HvSplitClaimRelease((volatile long *)&ept->SplitClaim);
     return STATUS_SUCCESS;
+}
+
+// ── Return both pre-allocated hook pools ────────────────────────────────
+//
+// They are allocated once in HvEfiDriverEntryImpl (Step 7b) and, before this,
+// were freed by nothing: every boot leaked 128 KB of firmware pages, and a
+// bring-up that failed after Step 7b leaked them too.
+//
+// The order is deliberate. A split record can name a page that came from the
+// spare pool, and if the pool were freed first then HvEptDestroy's or unhide's
+// own sweep would free that same page a second time. So pool-owned split
+// records are unlinked here, with their regions collapsed first so no live EPT
+// entry is left pointing at a page the pool is about to release.
+//
+// Idempotent - the pools are NULLed and the masks cleared, so a second call is a
+// no-op. That matters because it runs from HvEptDestroy and from the driver's
+// failure funnel, and both can be reached on the same exit path.
+void HvEptHookPoolsFree(void) {
+    UINT32 i, slot;
+
+    EptDropAllHooks();
+
+    for (i = 0; i < g_Hv.Ept.SplitCount; ) {
+        slot = HvHookPoolFindPtr((const void *const *)g_Hv.SparePtPool,
+                                 HV_MAX_EPT_HOOKS,
+                                 (const void *)g_Hv.Ept.SplitPages[i]);
+        if (slot == HV_HOOK_SLOT_NONE) { i++; continue; }
+
+        if (g_Hv.Ept.SplitOriginalPd[i] != 0) {
+            UINT64 regionBase = g_Hv.Ept.SplitRegionBase[i];
+            UINT32 g = (UINT32)(regionBase >> EPT_PDPT_SHIFT);
+            if (g < g_Hv.Ept.PdptCount && g_Hv.Ept.PdptPages[g] != NULL) {
+                UINT32 pdIdx =
+                    (UINT32)((regionBase >> EPT_PD_SHIFT) & EPT_ENTRY_MASK);
+                g_Hv.Ept.PdptPages[g][pdIdx].Value = g_Hv.Ept.SplitOriginalPd[i];
+            }
+        }
+        HvHookPoolReleaseAtomic((volatile long *)&g_Hv.SparePtUsedMask, slot);
+        EptRemoveSplitRecord(&g_Hv.Ept, i);
+    }
+
+    for (i = 0; i < HV_MAX_EPT_HOOKS; i++) {
+        if (g_Hv.ShadowPagePool[i] != NULL) {
+            // Zero before free: firmware pages are reused by the OS, and a
+            // shadow page holds a copy of the hooked code.
+            RtlSecureZeroMemory(g_Hv.ShadowPagePool[i], PAGE_SIZE);
+            EfiFreePages(g_Hv.ShadowPagePool[i], 1);
+            g_Hv.ShadowPagePool[i] = NULL;
+        }
+        if (g_Hv.SparePtPool[i] != NULL) {
+            RtlSecureZeroMemory(g_Hv.SparePtPool[i], PAGE_SIZE);
+            EfiFreePages(g_Hv.SparePtPool[i], 1);
+            g_Hv.SparePtPool[i] = NULL;
+        }
+    }
+
+    g_Hv.ShadowPageUsedMask = 0;
+    g_Hv.SparePtUsedMask = 0;
+    // No split can be in flight while the table is being torn down, but leaving
+    // a stale tag in the claim word would make a later split of that region
+    // (after a re-init) refuse itself.
+    g_Hv.Ept.SplitClaim = 0;
 }
