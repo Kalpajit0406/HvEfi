@@ -39,30 +39,74 @@ static BOOLEAN g_ApicIdsRecorded = FALSE;
 
 // Resolve this CPU's VCPU slot, or fail.
 //
-// PI spec: WhoAmI returns the processor HANDLE, a dense 0..(EnabledProcessorCount-1)
-// enumeration. That is exactly g_Hv.Vcpus[]'s index space, so it is the only
-// sound source here.
+// PI spec: WhoAmI returns the processor HANDLE, a dense 0..(NumberOfProcessors-1)
+// enumeration. That is exactly g_Hv.Vcpus[]'s index space, so it is the
+// preferred source.
 //
-// Pass 94 removed the old fallback to HvReadApicIdLocal(). The x2APIC ID is a
-// different numbering, and on the usual Intel client layout (a 12-thread part
-// reports APIC IDs 0,2,4,...,22) feeding it to a handle-indexed array either
-// skipped the AP outright or - worse - wrote this CPU's VMXON/VMCS pointers into
-// a DIFFERENT CPU's VCPU struct, leaving two processors sharing one VMCS. Neither
-// is a crash, so neither was ever reported.
+// Pass 94 removed the old fallback that used HvReadApicIdLocal() AS AN INDEX.
+// That was wrong on sparse topologies (APIC IDs 0,2,4,...,22): it either skipped
+// the AP or wrote into a different CPU's VCPU struct.
 //
-// Failing closed turns both cases into the count mismatch the rollback path
-// already handles correctly. A CPU left un-virtualized is recoverable; a CPU
-// virtualized into the wrong slot is silent corruption.
+// Pass 95: WhoAmI fails on the Dell G15 5530 firmware (i5-13450HX). Three
+// fallback tiers, each safe (match by value or by flag, never index-by-APIC-ID):
+//   1. WhoAmI (preferred, fails on Dell)
+//   2. BSP flag in IA32_APIC_BASE MSR + PROCESSOR_AS_BSP_BIT in GetProcessorInfo
+//   3. APIC ID match: CPUID value against GetProcessorInfo's ProcessorId
+//      (both full 32-bit and 8-bit initial comparisons, since firmware and
+//      CPUID can disagree on hybrid parts)
 static BOOLEAN TryCurrentCpuIndex(UINT32 *outIndex) {
     UINTN cpuNum = 0;
     unsigned int idx = 0;
 
     if (!gEfiMp) return FALSE;
-    if (EFI_ERROR(gEfiMp->WhoAmI(gEfiMp, &cpuNum))) return FALSE;
-    if (!HvSmpResolveVcpuIndex((unsigned int)cpuNum, g_Hv.VcpuCount, &idx))
-        return FALSE;
-    if (outIndex) *outIndex = (UINT32)idx;
-    return TRUE;
+
+    // Tier 1: WhoAmI — the PI-spec-blessed answer.
+    if (!EFI_ERROR(gEfiMp->WhoAmI(gEfiMp, &cpuNum))) {
+        if (HvSmpResolveVcpuIndex((unsigned int)cpuNum, g_Hv.VcpuCount, &idx)) {
+            if (outIndex) *outIndex = (UINT32)idx;
+            return TRUE;
+        }
+    }
+
+    // Tier 2: BSP detection via IA32_APIC_BASE[8] + GetProcessorInfo flags.
+    // The BSP bit in this MSR is architectural and does not depend on firmware
+    // MP Services working correctly.
+    {
+        UINT64 apicBase = __readmsr(0x1B);
+        BOOLEAN isBsp = (apicBase & (1ULL << 8)) != 0;
+        if (isBsp) {
+            for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
+                EFI_PROCESSOR_INFORMATION info;
+                if (!EFI_ERROR(gEfiMp->GetProcessorInfo(gEfiMp, h, &info)) &&
+                    (info.StatusFlag & PROCESSOR_AS_BSP_BIT)) {
+                    if (outIndex) *outIndex = (UINT32)h;
+                    return TRUE;
+                }
+            }
+        }
+    }
+
+    // Tier 3: APIC ID match. Try the full x2APIC ID first (CPUID.0Bh),
+    // then the 8-bit initial APIC ID (CPUID.1:EBX[31:24]), since firmware
+    // ProcessorId can be either format on hybrid parts.
+    {
+        UINT32 localApic = HvReadApicIdLocal();
+        int regs1[4] = {0};
+        __cpuid(regs1, 1);
+        UINT32 initialApic = (UINT32)((regs1[1] >> 24) & 0xFF);
+
+        for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
+            EFI_PROCESSOR_INFORMATION info;
+            if (!EFI_ERROR(gEfiMp->GetProcessorInfo(gEfiMp, h, &info))) {
+                UINT32 fwId = (UINT32)info.ProcessorId;
+                if (fwId == localApic || fwId == initialApic) {
+                    if (outIndex) *outIndex = (UINT32)h;
+                    return TRUE;
+                }
+            }
+        }
+    }
+    return FALSE;
 }
 
 PVCPU HvGetCurrentVcpu(void) {
@@ -127,19 +171,10 @@ static void VirtualizeCpuCallback(PVOID context) {
 }
 
 static void VirtualizeCpuBody(PVOID context) {
-    UNREFERENCED_PARAMETER(context);
-
-    UINT32 idx = 0;
-    if (!TryCurrentCpuIndex(&idx)) {
-        // Unresolvable handle: refuse this CPU rather than guess a slot.
-        // Reported as a stage-12 failure so the receipt names the class,
-        // instead of only showing a count that came up short.
-        // Deliberately no mailbox write here. Every AP shares one
-        // Stage/Detail pair, so N failing APs raced on it and the
-        // receipt named an arbitrary CPU. The BSP writes a single
-        // deterministic summary once the IPI returns, and infers
-        // "unresolvable handle" from a short count with no per-CPU
-        // LaunchError recorded. See HvReportBringUpSummary().
+    UINT32 idx;
+    if (context != NULL) {
+        idx = (UINT32)((UINTN)context - 1);
+    } else if (!TryCurrentCpuIndex(&idx)) {
         return;
     }
     if (idx >= g_Hv.VcpuCount) return;
@@ -148,6 +183,7 @@ static void VirtualizeCpuBody(PVOID context) {
     // Record the APIC ID now (MP Services valid in DXE): the runtime exit
     // path resolves VCPUs from this table and never touches gEfiMp.
     vcpu->ApicId = HvReadApicIdLocal();
+    g_ApicIdsRecorded = TRUE;
 
     // Core Exclusion Check (Pass 96): skip virtualization for flagged cores
     if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
@@ -586,11 +622,6 @@ static VOID HvReportBringUpSummary(const UINTN *failedList) {
 
 NTSTATUS HvSmpVirtualizeAllProcessors(void) {
     g_VmxonSuccess = 0;
-    // PI spec: if the timeout expires, "Procedure on the failed APs is terminated"
-    // and FailedCpuList names them. MP Services allocates the buffer with
-    // AllocatePool, so the caller owns freeing it - passing NULL used to throw
-    // that information away and left the receipt with a bare count.
-    UINTN  *failedList = NULL;
 
     // Pre-initialize Host GDT and IDT with all VCPU TSS descriptors on BSP
     HV_DTR gdtr;
@@ -606,32 +637,44 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
         return hostTblSt;
     }
 
-    // Virtualize BSP first (the current processor)
-    VirtualizeCpuCallback(NULL);
+    // Find BSP handle: iterate GetProcessorInfo for the BSP flag, fall back
+    // to handle 0 (universally correct on PI-compliant firmware).
+    UINT32 bspHandle = 0;
+    for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
+        EFI_PROCESSOR_INFORMATION info;
+        if (!EFI_ERROR(gEfiMp->GetProcessorInfo(gEfiMp, h, &info)) &&
+            (info.StatusFlag & PROCESSOR_AS_BSP_BIT)) {
+            bspHandle = (UINT32)h;
+            break;
+        }
+    }
+
+    // Virtualize BSP first. Handle encoded as (handle + 1) so handle 0
+    // is distinguishable from NULL.
+    VirtualizeCpuCallback((PVOID)(UINTN)(bspHandle + 1));
 
     // If the BSP itself failed to launch, skip the APs: the count check below
     // triggers the rollback path regardless, and attempting AP bring-up would
     // only burn the 5 s timeout (plus a VMXON/VMLAUNCH cycle per AP) for nothing.
-    // VirtualizeCpuCallback increments g_VmxonSuccess only after a successful
-    // VMLAUNCH, so a zero count here means the BSP never launched.
     if (g_Hv.VcpuCount > 1 && (UINT32)g_VmxonSuccess > 0) {
-        // 5-second timeout: an AP that hangs in VirtualizeCpuCallback (e.g.
-        // VMXON fails, VMPTRLD hangs, VMLAUNCH faults) must not stall the BSP
-        // indefinitely. If the timeout fires, EFI_TIMEOUT is returned and we
-        // fall through to the partial-rollback path below.
-        EFI_STATUS st = gEfiMp->StartupAllAPs(
-            gEfiMp,
-            ApVirtualizeCallback,
-            TRUE,       // SingleThread = TRUE (sequential bring-up)
-            NULL,       // WaitEvent = NULL (blocking)
-            5000000,    // TimeoutInMicroseconds = 5 s
-            NULL,       // ProcedureArgument
-            &failedList  // real list: names the APs terminated at the timeout
-        );
-        if (EFI_ERROR(st) && st != EFI_TIMEOUT) {
-            EfiFatal("StartupAllAPs failed: %r\n", st);
+        // Dispatch each AP individually via StartupThisAP so the handle is
+        // passed explicitly as context — WhoAmI is broken on the Dell G15
+        // firmware and GetProcessorInfo reports IDs that do not match CPUID.
+        for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
+            if (h == (UINTN)bspHandle) continue;
+            EFI_STATUS st = gEfiMp->StartupThisAP(
+                gEfiMp,
+                ApVirtualizeCallback,
+                h,                              // ProcessorNumber
+                NULL,                           // WaitEvent (blocking)
+                5000000,                        // 5 s timeout per AP
+                (PVOID)(UINTN)(h + 1),          // handle encoded as h+1
+                NULL                            // Finished
+            );
+            if (EFI_ERROR(st)) {
+                EfiFatal("StartupThisAP(%u): %r\n", (unsigned)h, st);
+            }
         }
-        // EFI_TIMEOUT falls through: g_VmxonSuccess < VcpuCount triggers rollback
     }
 
     // Compute target VCPU count taking exclusion mask into account
@@ -650,14 +693,12 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
     }
     g_Hv.TargetVcpuCount = targetCount;
 
-    // Read the terminated-AP list into the summary BEFORE freeing it:
-    // MP Services owns the allocation, so this is the only chance.
+    // Every CPU that ran recorded its APIC ID at entry: the runtime VCPU
+    // lookup can use the APIC-ID table for partial-launch devirt too.
+    g_ApicIdsRecorded = TRUE;
+
     if ((UINT32)g_VmxonSuccess < g_Hv.TargetVcpuCount) {
-        HvReportBringUpSummary((const UINTN *)failedList);
-    }
-    if (failedList != NULL) {
-        gEfiBS->FreePool(failedList);
-        failedList = NULL;
+        HvReportBringUpSummary(NULL);
     }
 
     // Verify all CPUs succeeded.
@@ -700,9 +741,6 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
 
     HvTransitionState(HV_STATE_HIDDEN, HV_STATE_RUNNING);
     g_Hv.Running = TRUE;  // legacy shim
-    // Every CPU recorded its APIC ID above: the exit path can now resolve
-    // VCPUs without MP Services (which dangle after ExitBootServices).
-    g_ApicIdsRecorded = TRUE;
     return STATUS_SUCCESS;
 }
 

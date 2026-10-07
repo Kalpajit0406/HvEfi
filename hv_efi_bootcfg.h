@@ -246,9 +246,16 @@ static __inline int HvMailboxValid(const volatile HV_MAILBOX *mb)
 }
 
 // Arm a freshly allocated page. Called by the application.
+// Zeroes the entire struct first so stale data from a previous boot
+// (especially CoreExclusionMask) cannot persist and silently alter behavior.
 static __inline void HvMailboxInit(volatile HV_MAILBOX *mb, unsigned int flags)
 {
     if (mb == 0) return;
+    {
+        volatile unsigned char *p = (volatile unsigned char *)mb;
+        unsigned int i;
+        for (i = 0; i < sizeof(HV_MAILBOX); i++) p[i] = 0;
+    }
     mb->Magic    = HV_MAILBOX_MAGIC;
     mb->Stage    = 0;
     mb->Detail   = 0;

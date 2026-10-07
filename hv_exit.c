@@ -249,8 +249,22 @@ static void HandleNmi(void) {
 }
 
 // ── External interrupt handler ──────────────────────────────────────────────
+//
+// With EXIT_CTRL_ACK_INT_ON_EXIT the processor acknowledges the interrupt
+// controller on the VM exit and stores the vector in EXIT_INTERRUPTION_INFO.
+// Re-inject it via ENTRY_INTERRUPTION_INFO so the guest receives the interrupt
+// exactly as it would on bare metal.
 
-static void HandleExternalInterrupt(void) {}
+static void HandleExternalInterrupt(void) {
+  UINT64 exitIntInfo = 0;
+  __vmx_vmread(VMCS_EXIT_INTERRUPTION_INFO, &exitIntInfo);
+
+  if (exitIntInfo & (1ULL << 31)) {
+    UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
+    UINT64 injectInfo = (UINT64)vector | (0ULL << 8) | (1ULL << 31);
+    __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
+  }
+}
 
 // ── VMCALL handler ──────────────────────────────────────────────────────────
 
@@ -859,6 +873,29 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   case EXIT_REASON_WBINVD:
     // WBINVD exiting is off; flushing the caches in root is exact.
     __wbinvd();
+    AdvanceGuestRip();
+    break;
+
+  // ── Defensive handlers ────────────────────────────────────────────────────
+  // These exit reasons are NOT requested by the VMCS controls but some CPUs
+  // force the corresponding control bit via FIXED0. Reaching `default` would
+  // devirtualize the CPU, which crashes post-ExitBootServices. Advancing RIP
+  // is always safe: it makes the guest skip the instruction. The functional
+  // loss (a dropped DR write, an unemulated IN) is acceptable as a survival
+  // strategy for a control bit we never asked for.
+  case EXIT_REASON_PENDING_INTERRUPT:
+    break;
+  case EXIT_REASON_TASK_SWITCH:
+  case EXIT_REASON_DR_ACCESS:
+  case EXIT_REASON_IO:
+  case EXIT_REASON_RDPMC:
+  case EXIT_REASON_RDTSC:
+  case EXIT_REASON_RSM:
+  case EXIT_REASON_MWAIT:
+  case EXIT_REASON_MONITOR:
+  case EXIT_REASON_GDTR_IDTR:
+  case EXIT_REASON_LDTR_TR:
+  case EXIT_REASON_RDTSCP:
     AdvanceGuestRip();
     break;
 

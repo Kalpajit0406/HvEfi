@@ -274,7 +274,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // PMU stays transparent across every exit/entry without a bitmap trap.
     UINT32 exitCtls = AdjustControls(
         EXIT_CTRL_HOST_ADDR_SPACE_SIZE | EXIT_CTRL_SAVE_EFER |
-        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT,
+        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT |
+        EXIT_CTRL_ACK_INT_ON_EXIT,
         MSR_IA32_VMX_TRUE_EXIT_CTLS);
     HvVmWriteChecked(VMCS_EXIT_CONTROLS, exitCtls);
 
