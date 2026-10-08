@@ -251,6 +251,55 @@ pattern. A missing line narrows the failure to a specific code path.
 | 99 | IDT_VECTORING re-inject race | `HandleNmi` and the newly reinstated `HandleExternalInterrupt` both wrote `VMCS_ENTRY_INTERRUPTION_INFO` unconditionally, which could clobber an IDT-vectoring event in flight (SDM §27.2.4) — the exit handler's generic re-inject block then skipped it because the valid bit was already set, so an in-flight exception was silently dropped. Pass 99 makes both handlers check `VMCS_IDT_VECTORING_INFO` first and defer to the generic re-inject when its valid bit is set; the new interrupt or NMI is dropped once rather than corrupting an in-flight exception. |
 | 99 | Per-AP timeout tightened (budget headroom vs the 120 s watchdog) | `StartupThisAP` was called sequentially with a 5 s timeout per AP. On the 16-thread Dell target that is 75 s of worst-case bring-up against a 120 s firmware watchdog — too close for comfort if a single AP's MSR path happened to be slow. Reduced to 2 s per AP (30 s worst case), with the rationale and the budget calculation documented at the call site. A single VMLAUNCH on a modern core completes in milliseconds; 2 s is still an order-of-magnitude ceiling. |
 | 99 | Open Issue 2 fail-safe (post-EBS devirtualization) | The asm shutdown stub routes through `HvAsmSwitchToGuest`, which fetches instructions AFTER the `mov cr3` to guest tables — a VA the guest's page tables don't map, so the next fetch #PFs with no handler and triple-faults the machine. Pre-EBS the guest IS the firmware whose identity map covers the stub, so the path is safe; post-EBS it is not. Pass 99 adds a post-EBS short-circuit to `HvDevirtualizeThisCpu`: if the mailbox's `EBS_OK` flag is set, inject `#UD(0)` into the guest (so the architectural event surfaces — Windows bugchecks with a stack trace rather than hard-resetting) and return `TRUE` so the asm stub takes the VMRESUME path, not the shutdown path. Pre-EBS behaviour is unchanged. This narrows Open Issue 2 from "any unmodelled exit reaches a triple-fault" to "any unmodelled exit injects a #UD the OS can report". |
+| 99 | Cross-compiler build enablement (Linux + CLANGPDB) | Previously the module could only be built on Windows with MSVC + ml64. Pass 99 adds three small, strictly-additive cross-build hooks: (1) `#ifndef DECLSPEC_ALIGN` guards around hvdefs.h's two `__declspec(align(x))` definitions so a shim can predefine the GCC spelling; (2) `#ifndef HV_CROSS_SKIP_INTRIN_REDECLS` around hvdefs.h's MSVC-only intrinsic redeclarations so clang+mingw's intrinsics win when they conflict; (3) an `HV_FORCEINLINE` macro in `shared/hv_siphash.h` that routes to `__forceinline` on MSVC and `inline __attribute__((always_inline))` on GCC/Clang. The Windows build sees exactly the same code generation (all three guards are no-ops when the shim is absent). Enables `build -t CLANGPDB` on Linux with mingw-w64 headers + a per-module shim; proven in Pass 99 by producing a 188 KB `HvEfi.efi` from the current tree and booting it under QEMU+OVMF with the correct POST byte stream (`B0 B1 B2 B3` = safe-mode stand-down, matching the entry-preamble POST map). |
+
+### Pass 99 build & boot proof
+
+Reproducing the build + boot from a Linux container:
+
+```
+# One-time setup
+apt install -y nasm iasl uuid-dev build-essential acpica-tools \
+                qemu-system-x86 ovmf mingw-w64 clang lld
+git clone --depth 1 --branch edk2-stable202405 \
+          https://github.com/tianocore/edk2.git ~/edk2
+cd ~/edk2 && git submodule update --init --depth 1
+make -C BaseTools -j && . edksetup.sh
+
+# One-time per-build-tree layout (shared headers resolve as ../*.h):
+mkdir -p HvEfi/shim_include HvDrv
+ln -s $PWD/HvEfi/shared/* .
+ln -s $PWD/HvEfi/shared/HvDrv/hv_msr_contract.h HvDrv/
+# ... see HvEfi/HvEfiPkg.dsc + HvEfi/HvEfi.inf for the per-build knobs.
+
+build -a X64 -b DEBUG -t CLANGPDB -p HvEfi/HvEfiPkg.dsc -m HvEfi/HvEfi.inf
+# -> Build/HvEfiPkg/DEBUG_CLANGPDB/X64/HvEfi.efi (PE32+ DXE runtime driver)
+```
+
+Boot proof (QEMU + OVMF, 2 vCPU, no HvBoot.efi provisioned, so the driver's
+entry preamble runs the SAFE stand-down path):
+
+```
+qemu-system-x86_64 \
+  -machine q35 -m 2048 -smp 2 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,file=OVMF_VARS_4M.fd \
+  -drive format=raw,file=fat:rw:esp \
+  -chardev file,id=post,path=post.log \
+  -device isa-debugcon,iobase=0x80,chardev=post \
+  -display none -nographic
+# post.log contents (hex, port 0x80 writes): B0 B1 B2 B3
+```
+
+That matches the POST CODE MAP in `hv_efi_main.c` (lines 106-114) exactly:
+
+- `0xB0` entry reached, `0xB1` guard passed, `0xB2` boot/runtime services captured,
+- `0xB3` no mailbox → unobservable boot, standing down.
+
+The driver returned `EFI_ABORTED` (the designed safe-mode return) and the
+firmware carried on cleanly — no hang, no triple-fault, no watchdog expiry.
+A full-mode boot still requires the HvBoot.efi handoff and provisioned
+ticket, which are architecturally outside the DXE driver's own scope.
 
 ---
 

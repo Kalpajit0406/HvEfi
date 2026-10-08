@@ -77,7 +77,9 @@ typedef struct _PHYSICAL_MEMORY_RANGE {
 #define MAXULONG64          0xFFFFFFFFFFFFFFFFULL
 
 #define UNREFERENCED_PARAMETER(x) (void)(x)
+#ifndef DECLSPEC_ALIGN
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
+#endif
 
 // Volatile interlocked ops — MSVC builtins
 //
@@ -201,6 +203,14 @@ void HvAsmLoadTr(UINT16 selector);
 void HvAsmLoadLdtr(UINT16 selector);
 void HvAsmWriteDr7(UINT64 value);   /* 64-bit: __writedr truncates to 32 */
 
+// MSVC-only intrinsic redeclarations: the EDK2 Windows build needs these
+// because MDE_CPU_X64 omits <intrin.h>, but a Linux cross-build driven by
+// clang-targeting-windows-gnu provides them via mingw's <intrin.h>, and
+// redeclaring them with slightly different signatures causes "cannot combine
+// specifier" / "function cannot return function type" errors. The cross-build
+// defines HV_CROSS_SKIP_INTRIN_REDECLS via its -include shim so this block
+// is skipped there and mingw's declarations win.
+#ifndef HV_CROSS_SKIP_INTRIN_REDECLS
 #pragma intrinsic(__readcr0)
 #pragma intrinsic(__readcr3)
 #pragma intrinsic(__readcr4)
@@ -261,6 +271,7 @@ void __cpuidex(int *, int, int);
 #pragma intrinsic(__stosb)
 void __movsb(unsigned char *, const unsigned char *, unsigned __int64);
 void __stosb(unsigned char *, unsigned char, unsigned __int64);
+#endif /* !HV_CROSS_SKIP_INTRIN_REDECLS */
 #define RtlCopyMemory(dst, src, sz)   __movsb((unsigned char*)(dst), (const unsigned char*)(src), (sz))
 #define RtlZeroMemory(dst, sz)        __stosb((unsigned char*)(dst), 0, (sz))
 #define RtlSecureZeroMemory(dst, sz)  __stosb((unsigned char*)(dst), 0, (sz))
@@ -280,7 +291,13 @@ typedef struct _PHYSICAL_MEMORY_RANGE {
 } PHYSICAL_MEMORY_RANGE;
 
 #define PAGE_SIZE           0x1000
+// DECLSPEC_ALIGN: __declspec(align(x)) is the MSVC spelling. Clang on
+// windows-gnu reports it as "unknown attribute 'align' ignored" under
+// -Werror. The cross-build shim defines a compatible version first; honour
+// it rather than overwriting.
+#ifndef DECLSPEC_ALIGN
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
+#endif
 #define KdPrint(x)          ((void)0)
 #define UNREFERENCED_PARAMETER(x) (void)(x)
 #define NT_SUCCESS(s)       ((NTSTATUS)(s) >= 0)
