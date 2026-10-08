@@ -99,8 +99,11 @@ static UINT32 AdjustControls(UINT32 desired, UINT32 msrIndex) {
 // exit handler's code does, so the tables outlive the OS.
 
 static UINT8 g_HvHostIdt[HV_IDT_ENTRIES * HV_IDT_GATE_BYTES];
-static UINT8 g_HvHostGdt[HV_HOST_GDT_MAX_BYTES];
-static UINT32 g_HvHostGdtLimit = 0;
+// External linkage: hv_exit.c's SIPI handler reads these so a strict Intel
+// CPU validator (hybrid Raptor Lake E-cores notably) sees a GDT that
+// actually contains the TR descriptor at tssSel on VM entry.
+UINT8  g_HvHostGdt[HV_HOST_GDT_MAX_BYTES];
+UINT32 g_HvHostGdtLimit = 0;
 UINT16 g_HvHostBaseTssSlot = 0;
 static BOOLEAN g_HvHostTablesInitialized = FALSE;
 

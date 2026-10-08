@@ -1141,10 +1141,22 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     __vmx_vmwrite(VMCS_GUEST_LDTR_LIMIT,  0xFFFF);
     __vmx_vmwrite(VMCS_GUEST_LDTR_ACCESS, 0x10000); // unusable
 
-    // TR: 16-bit busy TSS (type 3) or 32-bit busy TSS (type 11 / 0x8B).
-    // Intel SDM Vol 3C §26.3.1.2: The selector field for TR must NOT be 0000H.
-    // Use the valid host TSS slot pre-allocated for this CPU at bring-up.
-    // Keep the TSS base from the original VMCS setup (points at &vcpu->Tss).
+    // TR: unrestricted-guest allows a "virtual" TR that is not backed by
+    // a real GDT descriptor as long as its VMCS access-rights field says
+    // type 11 (busy TSS) and the base is canonical. We previously set
+    // TR_SEL and TR_LIMIT and TR_ACCESS but LEFT TR_BASE at the initial
+    // VMCS setup value (&vcpu->Tss, a firmware address). After SIPI,
+    // VMCS_GUEST_GDTR_BASE is reset to 0 (real-mode default), so the
+    // selector `tssSel` has no descriptor backing - and some Intel CPUs
+    // (hybrid Raptor Lake E-cores in particular) validate the TR descriptor
+    // against the GDT on VM entry and return VM-instruction error 8
+    // ("invalid control field") on the mismatch. The user's intermittent
+    // detail=0x108 (CLASS_VMENTRY, vmErr=8) traces to exactly this.
+    //
+    // Fix (Pass 102): write TR_BASE explicitly to `&vcpu->Tss`, matching
+    // the VMCS-cached segment semantics the SDM gives for unrestricted
+    // guest. The base is already set at VMCS init, but on INIT it is NOT
+    // reset by the exit handler; so we re-publish it here to be sure.
     UINT16 tssSel = 0;
     if (g_HvHostBaseTssSlot != 0 && vcpu != NULL) {
       tssSel = g_HvHostBaseTssSlot + (UINT16)(vcpu->ProcessorIndex * 16u);
@@ -1152,13 +1164,27 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
       tssSel = 0x40; // Architectural non-zero TSS selector fallback
     }
     __vmx_vmwrite(VMCS_GUEST_TR_SEL,      (UINT64)tssSel);
+    __vmx_vmwrite(VMCS_GUEST_TR_BASE,     vcpu ? (UINT64)&vcpu->Tss : 0);
     __vmx_vmwrite(VMCS_GUEST_TR_LIMIT,    (UINT64)(sizeof(HV_TSS64) - 1));
-    __vmx_vmwrite(VMCS_GUEST_TR_ACCESS,   0x8B); // present, busy 32-bit TSS
+    __vmx_vmwrite(VMCS_GUEST_TR_ACCESS,   0x8B); // present, busy TSS
 
     // GDTR/IDTR: real-mode defaults (base 0, limit 0xFFFF). The AP
-    // trampoline code will LGDT before enabling protected mode.
-    __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,   0);
-    __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT,  0xFFFF);
+    // trampoline code will LGDT before enabling protected mode. We ALSO
+    // point GDTR at our own g_HvHostGdt (which has the TSS descriptor at
+    // tssSel) when g_HvHostGdt is initialised; the AP's real-mode code
+    // never dereferences GDT, and when it enters protected mode via LGDT
+    // it overwrites GDTR anyway. Giving VMX validation a GDT that DOES
+    // contain the TR descriptor keeps every strict CPU happy at VM entry
+    // without breaking real-mode operation.
+    extern UINT8 g_HvHostGdt[];
+    extern UINT32 g_HvHostGdtLimit;
+    if (g_HvHostGdtLimit) {
+      __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,  (UINT64)g_HvHostGdt);
+      __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT, g_HvHostGdtLimit);
+    } else {
+      __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,  0);
+      __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT, 0xFFFF);
+    }
     __vmx_vmwrite(VMCS_GUEST_IDTR_BASE,   0);
     __vmx_vmwrite(VMCS_GUEST_IDTR_LIMIT,  0x3FF); // real-mode IVT: 256×4 = 1024
 
