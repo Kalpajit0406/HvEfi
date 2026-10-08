@@ -281,11 +281,45 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   HvCpuidLookup(vcpu, leaf, subleaf, out);
 
   if (leaf == 1) {
-    // ECX.5 (VMX) is deliberately LEFT SET. Clearing it on a VMX-capable CPU
-    // is self-contradictory and is paired with FEATURE_CONTROL returning
-    // "firmware-disabled" — the coherent story hardware already tells.
-    out[2] &= ~(1u << 31);   // hypervisor present
-    out[3] &= ~(1u << 31);   // EDX.31 (some older CPUs)
+    // ECX.31 (hypervisor present): must be 0 to look like bare metal.
+    out[2] &= ~(1u << 31);
+    // EDX.31 (reserved on some older CPUs that signal "hypervisor present"
+    // in EDX instead of ECX).
+    out[3] &= ~(1u << 31);
+    // ECX.5 (VMX): also masked to 0.
+    //
+    // Pass 100 fix for Open Issue 1 (Dell Class B hang).
+    //
+    // The receipt from the Dell boot shows FULL DONE + CHAIN WIN slot start
+    // then silent hang - no BSOD, no further receipt. The hypervisor is
+    // alive and virtualization completed; Windows just stops under VMX
+    // non-root. Modern Windows (10/11) with Hyper-V or VBS auto-enabled
+    // reads CPUID.1:ECX.VMX and, if set, tries to initialise its own
+    // virtualization stack. VMXON then fails because our RDMSR of
+    // IA32_FEATURE_CONTROL returns LOCKED without VMXON_OUTSIDE_SMX. The
+    // "VMX advertised, VMX blocked" state is architecturally inconsistent,
+    // and the failure handling in hvix64 / securekernel is one of the few
+    // paths that CAN hang silently (versus the "no VMX at all" path, which
+    // boots cleanly). The project's previous comment called masking VMX
+    // "self-contradictory", but a bare-metal CPU with VMX locked disabled
+    // in firmware IS indistinguishable from a bare-metal CPU without VMX
+    // from the OS perspective. Masking VMX from CPUID presents the latter,
+    // coherent story and avoids waking Hyper-V / VBS at all. The symbolic
+    // "self-contradiction" is less important than Windows actually booting.
+    out[2] &= ~(1u << 5);
+  }
+
+  // Zero the "hypervisor vendor" range (0x40000000 .. 0x400000FF) so Windows
+  // and other guests don't see any fingerprint there. On bare metal with no
+  // outer hypervisor, this range returns the max-standard-leaf's data (an
+  // out-of-range leaf behaviour); on a system that DOES have an outer
+  // hypervisor (nested KVM, Hyper-V debug, etc.) the native CPUID returns
+  // that outer hypervisor's vendor string, which we must not leak. Returning
+  // all zeros is what a bare-metal CPU without any hypervisor extensions
+  // returns for an out-of-range leaf when the max standard leaf itself is
+  // all zeros - a plausible bare-metal response.
+  if ((leaf & 0xFFFFFF00u) == 0x40000000u) {
+    out[0] = out[1] = out[2] = out[3] = 0;
   }
 
   regs->Rax = out[0];
