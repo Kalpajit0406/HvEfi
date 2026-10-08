@@ -172,13 +172,13 @@ typedef struct {
 } HV_MAILBOX;
 
 // Core Exclusion Mask accessors
-static __inline unsigned __int64 HvMailboxCoreExclusionMaskGet(const volatile HV_MAILBOX *mb)
+static __inline unsigned long long HvMailboxCoreExclusionMaskGet(const volatile HV_MAILBOX *mb)
 {
     if (mb == 0) return 0;
-    return (unsigned __int64)mb->CoreExclusionMaskLow | ((unsigned __int64)mb->CoreExclusionMaskHigh << 32);
+    return (unsigned long long)mb->CoreExclusionMaskLow | ((unsigned long long)mb->CoreExclusionMaskHigh << 32);
 }
 
-static __inline void HvMailboxCoreExclusionMaskSet(volatile HV_MAILBOX *mb, unsigned __int64 mask)
+static __inline void HvMailboxCoreExclusionMaskSet(volatile HV_MAILBOX *mb, unsigned long long mask)
 {
     if (mb == 0) return;
     mb->CoreExclusionMaskLow = (unsigned int)(mask & 0xFFFFFFFFu);

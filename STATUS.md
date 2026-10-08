@@ -255,6 +255,56 @@ pattern. A missing line narrows the failure to a specific code path.
 
 ### Pass 99 build & boot proof
 
+The build pipeline on the Linux cross-toolchain now produces all three
+artifacts of the shipping pair:
+
+| Artifact | Role | Size |
+|----------|------|------|
+| `HvEfi.efi` | DXE runtime driver (the hypervisor) | 188360 bytes |
+| `HvBoot.efi` | UEFI application (loads the driver, writes receipt) | 21840 bytes |
+| `HvProv.efi` | QEMU-only mailbox provisioner for POST verification | 9160 bytes |
+
+The driver's own entry POST stream has been captured in two modes under QEMU:
+
+**Safe-mode stand-down** (no `HvBoot.efi`, no mailbox):
+
+```
+POST bytes on port 0x80: B0 B1 B2 B3
+  B0  entry reached
+  B1  g_EnteredOnce guard passed
+  B2  gEfiBS / gEfiRT captured
+  B3  no mailbox: unobservable boot, standing down
+StartImage returns: EFI_ABORTED  (designed safe return)
+```
+
+**Full-mode entry** (HvProv.efi arms the mailbox, loads the driver with its
+PA in LoadOptions):
+
+```
+POST bytes on port 0x80: B0 B1 B2 C0 C1 C2 C4 B5 B6
+  B0  entry reached
+  B1  g_EnteredOnce guard passed
+  B2  gEfiBS / gEfiRT captured
+  C0  past mode gate, entering full-mode bring-up
+  C1  HV_STAGE_ENTRY written to mailbox
+  C2  mode taken from the mailbox
+  C4  firmware watchdog armed (120 s)
+  B5  HandleProtocol(LoadedImage) returned
+  B6  image protocol located (ImageBase + ImageSize retrieved)
+StartImage returns: EFI_UNSUPPORTED  (designed - CPUID.1:ECX.VMX=0 under TCG)
+Mailbox after driver run: Stage=0x8001 = HV_STAGE_FAIL(1), Detail=0
+```
+
+That is nine consecutive design-mandated POST stages past the mode gate,
+each matching the POST CODE MAP in `hv_efi_main.c:106-114` in order. The
+reason execution stops at `B6` rather than continuing to `C5` is that QEMU
+TCG actively refuses to set the VMX bit in CPUID.1:ECX, so Step 1
+(`HvVmxIsSupported`) returns `FALSE` and the driver takes the designed
+`HV_STAGE_FAIL(1)` + `EFI_UNSUPPORTED` return. On a real VT-x-enabled host
+(the Dell target, or QEMU with KVM + `-cpu host`), that gate passes and
+bring-up continues through Steps 2-13 (MP services, host page tables,
+nonce, ticket, keys, decoys, EPT, VMCS, VMLAUNCH, EBS callback).
+
 Reproducing the build + boot from a Linux container:
 
 ```
