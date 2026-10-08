@@ -261,12 +261,36 @@ static void HandleNmi(void) {
 
 // ── External interrupt handler ──────────────────────────────────────────────
 //
-// With ACK-on-exit disabled, we just need to open the interrupt window
-// so the host can deliver the interrupt. Do NOT advance RIP.
+// Reached only when PIN_BASED_EXT_INT_EXIT is set, which the Raptor Lake FIXED0
+// bits force on whether or not we requested it. With EXIT_CTRL_ACK_INT_ON_EXIT
+// enabled (hv_vmcs.c), the CPU acknowledges the interrupt on exit and leaves
+// the vector in VMCS_EXIT_INTERRUPTION_INFO. The host IDT only halts, so we
+// re-inject the vector via VMCS_ENTRY_INTERRUPTION_INFO; the guest's own IVT /
+// IDT then handles it on VM-entry. Without this re-injection the interrupt is
+// silently dropped — the firmware timer tick, PS/2, USB, SATA, every IPI the
+// OS loader relies on. Do NOT advance RIP: the guest didn't execute anything,
+// an interrupt is an asynchronous event, so RIP must stay at the next
+// instruction to execute.
+//
+// If ACK_INT_ON_EXIT was stripped by AdjustControls (CPU disallows it, which
+// no shipping Intel CPU does), the valid-bit test below is FALSE and we
+// resume without injection — the interrupt stays pending at the LAPIC and
+// the guest will see it when it next clears IF, matching bare-metal behaviour
+// as closely as possible given the capability.
 
 static void HandleExternalInterrupt(void) {
-  // Nothing to do — the interrupt will be delivered when the guest
-  // re-enables interrupts (or on the next VM-entry with interrupts enabled).
+  UINT64 exitIntInfo = 0;
+  __vmx_vmread(VMCS_EXIT_INTERRUPTION_INFO, &exitIntInfo);
+
+  // Bit 31 is the valid bit. ACK sets it; the control stripped away by
+  // AdjustControls leaves it clear.
+  if (!(exitIntInfo & (1ULL << 31))) return;
+
+  UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
+  // Build the entry-injection word: vector, type 0 (external interrupt),
+  // error-code valid 0 (external interrupts never have one), valid bit 1.
+  UINT64 injectInfo = (UINT64)vector | (0ULL << 8) | (1ULL << 31);
+  __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
 }
 
 // ── VMCALL handler ──────────────────────────────────────────────────────────
@@ -741,7 +765,13 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
       g_Mailbox->VmresumeFailInstrErr = (UINT32)instrErr;
     }
   }
+#if DBG
+  // ExitCounts[64] lives inside HV_GLOBAL only in checked builds (hvdefs.h),
+  // and the HV_HYPERCALL_QUERY_EXIT_COUNTS reader (hv_efi_hypercall.c) is
+  // under the same guard. Without this guard the RELEASE build fails to
+  // compile with "struct HV_GLOBAL has no field named 'ExitCounts'".
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
+#endif
 
   UINT64 rip = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);

@@ -1,6 +1,6 @@
 # HvEfi — Project Status, Open Issues & Research
 
-> **Last updated**: 2026-10-08 (Pass 98)
+> **Last updated**: 2026-10-08 (Pass 99)
 > **Target hardware**: Dell G15 5530 — Intel Core i5-13450HX (Raptor Lake), Windows 11 Pro
 > **Firmware**: Dell UEFI (InsydeH2O-based), `VirtualizationFirmwareEnabled = True`
 
@@ -234,6 +234,8 @@ pattern. A missing line narrows the failure to a specific code path.
 | 98 | Dynamic 2MB EPT splitting | `HvEptSplitLargePage` replaces 2MB entries with 512 x 4KB entries on demand. |
 | 98 | Safe MSR access | `HvAsmSafeRdmsr`/`HvAsmSafeWrmsr` wrappers catch #GP from invalid MSR access. |
 | 98 | TSS EPT unhiding | TSS pages explicitly unhidden in EPT to prevent triple-fault on task switch. |
+| 99 | ACK_INT_ON_EXIT (regression recovery) | Pass 97 was documented as adding `EXIT_CTRL_ACK_INT_ON_EXIT` and a proper re-inject in `HandleExternalInterrupt`, but the code shipped with neither — the mask in `hv_vmcs.c` omitted the bit, and the handler was a bare no-op. Pass 99 puts both back: the bit is added to the desired exit controls (and stripped automatically on CPUs that disallow it), and `HandleExternalInterrupt` now reads `VMCS_EXIT_INTERRUPTION_INFO`, pulls out the vector, and writes a valid `VMCS_ENTRY_INTERRUPTION_INFO` so the guest's own IDT handles it on VM-entry. Fixes the Raptor Lake FIXED0 case where every external interrupt would otherwise exit, stay pending, and re-exit forever. |
+| 99 | RELEASE build fix (`ExitCounts` referenced outside `#if DBG`) | `hv_exit.c` incremented `g_Hv.ExitCounts[reason]` on every exit, but the field only exists in checked (`DBG`) builds — the matching reader in `hv_efi_hypercall.c` is guarded, the writer wasn't. A RELEASE build therefore failed with "struct HV_GLOBAL has no field named 'ExitCounts'". Pass 99 wraps the write in the same `#if DBG`. |
 
 ---
 

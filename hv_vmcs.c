@@ -262,7 +262,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     }
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS2, procCtls2);
 
-    // Exit controls: 64-bit host, save/load EFER/PAT.
+    // Exit controls: 64-bit host, save/load EFER/PAT, ACK interrupt on exit.
     //
     // IA32_PERF_GLOBAL_CTRL is deliberately NOT in the load/save set. This is a
     // partitioned hypervisor: the "guest" is the real Windows system and the
@@ -274,9 +274,22 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // disables all hardware counters for the machine (and is a loud tell).
     // Leaving the control clear means VMX never touches the MSR at all, so the
     // PMU stays transparent across every exit/entry without a bitmap trap.
+    //
+    // ACK_INT_ON_EXIT is in the desired set because some CPUs (notably Raptor
+    // Lake, FIXED0 bit 0) force PIN_BASED_EXT_INT_EXIT=1 whether we ask for it
+    // or not. Without ACK, every external interrupt exits to the host, the
+    // interrupt stays pending in the LAPIC, VM-entry delivers it again, exits
+    // again — an infinite loop that reads from outside as "boot hung". With
+    // ACK=1 the CPU acknowledges on exit and stores the vector in
+    // VMCS_EXIT_INTERRUPTION_INFO; HandleExternalInterrupt re-injects it via
+    // VMCS_ENTRY_INTERRUPTION_INFO so the guest still sees it. CPUs that do
+    // NOT force PIN_BASED_EXT_INT_EXIT never take the exit, so the handler is
+    // dormant; CPUs whose capability MSR disallows ACK have the bit stripped
+    // by AdjustControls, and HandleExternalInterrupt's early-out is harmless.
     UINT32 exitCtls = AdjustControls(
         EXIT_CTRL_HOST_ADDR_SPACE_SIZE | EXIT_CTRL_SAVE_EFER |
-        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT,
+        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT |
+        EXIT_CTRL_ACK_INT_ON_EXIT,
         MSR_IA32_VMX_TRUE_EXIT_CTLS);
     HvVmWriteChecked(VMCS_EXIT_CONTROLS, exitCtls);
 
