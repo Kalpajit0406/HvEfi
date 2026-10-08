@@ -101,7 +101,7 @@ static UINT32 AdjustControls(UINT32 desired, UINT32 msrIndex) {
 static UINT8 g_HvHostIdt[HV_IDT_ENTRIES * HV_IDT_GATE_BYTES];
 static UINT8 g_HvHostGdt[HV_HOST_GDT_MAX_BYTES];
 static UINT32 g_HvHostGdtLimit = 0;
-static UINT16 g_HvHostBaseTssSlot = 0;
+UINT16 g_HvHostBaseTssSlot = 0;
 static BOOLEAN g_HvHostTablesInitialized = FALSE;
 
 // Set if the host ever takes an unexpected exception in VMX root. Read by the
@@ -142,6 +142,8 @@ NTSTATUS HvHostTablesInit(UINT64 firmwareGdtBase, UINT16 firmwareGdtLimit,
         EfiFatal("HvVmcs: host IDT build failed\n");
         return STATUS_INVALID_PARAMETER;
     }
+
+    HvIdtSetGate(g_HvHostIdt, 13, (UINT64)HvAsmHostGpHandler, (UINT16)(csSelector & ~7));
 
     if (HvCopyHostGdt(g_HvHostGdt, (UINT32)sizeof(g_HvHostGdt),
                       firmwareGdtBase, firmwareGdtLimit) == 0) {
@@ -274,8 +276,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // PMU stays transparent across every exit/entry without a bitmap trap.
     UINT32 exitCtls = AdjustControls(
         EXIT_CTRL_HOST_ADDR_SPACE_SIZE | EXIT_CTRL_SAVE_EFER |
-        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT |
-        EXIT_CTRL_ACK_INT_ON_EXIT,
+        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT,
         MSR_IA32_VMX_TRUE_EXIT_CTLS);
     HvVmWriteChecked(VMCS_EXIT_CONTROLS, exitCtls);
 

@@ -894,18 +894,9 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
             AddHiddenVa(g_Hv.Ept.PdptPages[i]);
     }
 
-    // The two allocations that INDEX everything above. They are not VMX
-    // structures themselves, but a page full of page-aligned sub-4GB pointers
-    // is exactly what a guest physical scan looks for: the VCPU array hands
-    // over every VMCS/VMXON/bitmap address, and the PDPT-page array hands over
-    // the whole EPT. Hiding the targets while leaving the index visible leaves
-    // the hypervisor one pointer-chase away.
-    //
-    // Vcpus comes from EfiAllocPagesBelow4G (hv_efi_vmx.c): whole pages we own
-    // outright, and under EFI's identity mapping VA == PA, so walking the range
-    // page by page covers exactly the pages that get hidden.
-    if (g_Hv.Vcpus)
-        AddHiddenVaRange(g_Hv.Vcpus, (UINT64)g_Hv.VcpuCount * sizeof(VCPU));
+    // g_Hv.Vcpus is intentionally NOT hidden in EPT: guest TR base (VMCS_GUEST_TR_BASE)
+    // points directly to &vcpu->Tss inside the VCPU structure. Hiding this memory causes
+    // task switches or TSS accesses to hit EPT decoys and fail. (Mirrors HvDrv).
 
     // ept->PdptPages deliberately does NOT get the same treatment, and used to.
     // It comes from EfiAllocPool (hv_efi_ept.c), so it shares its 4 KB page with
@@ -1072,7 +1063,7 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
 
     // HiddenPages[] intentionally not wiped here — HvEfiIsHypervisorPage()
     // consults it on every physical hypercall as a second line of defence.
-    g_Hv.Ept.EptPointer = 0;
+    // g_Hv.Ept.EptPointer is preserved: HvEptFlushLocal() needs EPTP for INVEPT.
     RtlSecureZeroMemory(g_Hv.DecoyPagePa, sizeof(g_Hv.DecoyPagePa));
     g_Hv.SecretsPagePa = 0;
 

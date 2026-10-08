@@ -183,7 +183,6 @@ static void VirtualizeCpuBody(PVOID context) {
     // Record the APIC ID now (MP Services valid in DXE): the runtime exit
     // path resolves VCPUs from this table and never touches gEfiMp.
     vcpu->ApicId = HvReadApicIdLocal();
-    g_ApicIdsRecorded = TRUE;
 
     // Core Exclusion Check (Pass 96): skip virtualization for flagged cores
     if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
@@ -373,6 +372,13 @@ void HvCaptureUnloadState(PHV_UNLOAD_STATE s) {
     HV_VMREAD_OR_HALT(VMCS_GUEST_CR0, &s->Cr0);
     HV_VMREAD_OR_HALT(VMCS_GUEST_CR4, &s->Cr4);
     HV_VMREAD_OR_HALT(VMCS_GUEST_DR7, &s->Dr7);
+
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        g_Mailbox->VmresumeFailCount++;
+        UINT64 instrErr = 0;
+        __vmx_vmread(VMCS_VM_INSTR_ERROR, &instrErr);
+        g_Mailbox->VmresumeFailInstrErr = (UINT32)instrErr;
+    }
     // CR2 is deliberately not captured: VMX transitions never modify it, and
     // the exit stub performs no faulting accesses, so the guest's CR2 is
     // already intact. (If the stub ever faulted, CR2 would be the least of

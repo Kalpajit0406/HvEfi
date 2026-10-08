@@ -606,6 +606,27 @@ static __inline BOOLEAN HvXcr0ValueValid(UINT64 value, UINT64 supported) {
 #define EXIT_REASON_INVVPID             53
 #define EXIT_REASON_WBINVD              54
 #define EXIT_REASON_XSETBV              55
+#define EXIT_REASON_APIC_WRITE          56
+#define EXIT_REASON_RDRAND              57
+#define EXIT_REASON_INVPCID             58
+#define EXIT_REASON_VMFUNC              59
+#define EXIT_REASON_ENCLS               60
+#define EXIT_REASON_RDSEED              61
+#define EXIT_REASON_PML_FULL            62
+#define EXIT_REASON_XSAVES              63
+#define EXIT_REASON_XRSTORS             64
+#define EXIT_REASON_PCONFIG             65
+#define EXIT_REASON_SPP_EVENT           66
+#define EXIT_REASON_UMWAIT              67
+#define EXIT_REASON_TPAUSE              68
+#define EXIT_REASON_LOADIWKEY           69
+#define EXIT_REASON_ENCLV               70
+#define EXIT_REASON_ENQCMD              71
+#define EXIT_REASON_ENQCMDS             72
+#define EXIT_REASON_BUS_LOCK            73
+#define EXIT_REASON_INSTRUCTION_TIMEOUT 74
+#define EXIT_REASON_NOTIFICATION        75
+#define EXIT_REASON_WRMSRNS             77
 
 // ── Pin-based VM-execution controls ─────────────────────────────────────────
 
@@ -749,6 +770,8 @@ static __inline BOOLEAN HvXcr0ValueValid(UINT64 value, UINT64 supported) {
 #define HV_DEVIRT_INVALID_GUEST      5u
 #define HV_DEVIRT_MCE_DURING_ENTRY   6u
 #define HV_DEVIRT_UNLOAD             7u  // UNLOAD hypercall succeeded
+#define HV_DEVIRT_MSR_LOADING        8u  // VM-entry failure due to MSR loading
+#define HV_DEVIRT_VMENTRY_FAIL       9u  // VM-entry failure (exit reason bit 31 set)
 
 
 #define EPT_ENTRY_MASK                  0x1FF
@@ -1358,6 +1381,7 @@ typedef struct _HV_GLOBAL {
 extern HV_GLOBAL g_Hv;
 #include "hv_efi_bootcfg.h"
 extern volatile HV_MAILBOX *g_Mailbox;
+extern UINT16 g_HvHostBaseTssSlot;
 
 // ── Function declarations ───────────────────────────────────────────────────
 
@@ -1392,6 +1416,7 @@ NTSTATUS HvEptInitialize(PEPT_STATE ept);
 void     HvEptDestroy(PEPT_STATE ept);
 BOOLEAN  HvEptTranslateGpa(PEPT_STATE ept, UINT64 gpa, PUINT64 hpa);
 EPT_PTE *HvEptLookup4K(PEPT_STATE ept, UINT64 gpa);
+EPT_PTE *HvEptEnsure4K(PEPT_STATE ept, UINT64 gpa);
 BOOLEAN  HvEptIsRamPage(PEPT_STATE ept, UINT64 gpa);
 // Large-page-aware "is this GPA normal RAM" predicate (see hv_efi_ept.c).
 // HvEptLookup4K returns NULL for large pages (nearly all RAM). Requires a
@@ -1447,3 +1472,6 @@ extern int  HvAsmInvvpid(UINT64 type, void *desc);
 extern void HvAsmVmcallUnload(UINT64 magic, UINT64 id,
                                UINT64 p1, UINT64 p2,
                                UINT64 mac, UINT64 p3);
+extern BOOLEAN HvAsmReadMsrSafe(UINT32 msr, UINT64 *outVal);
+extern BOOLEAN HvAsmWriteMsrSafe(UINT32 msr, UINT64 val);
+extern void    HvAsmHostGpHandler(void);

@@ -208,6 +208,17 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   UINT32 subleaf = (UINT32)regs->Rcx;
   UINT32 out[4] = {0, 0, 0, 0};
 
+  // Canary leaf 0x13371337: Zero-privilege Ring 3 hypervisor residency proof.
+  // Bypasses ticket/VMCALL requirements and allows instant per-core verification.
+  if (leaf == 0x13371337) {
+    regs->Rax = 0x564D5831; // "VMX1" magic signature
+    regs->Rbx = vcpu ? (UINT64)vcpu->ProcessorIndex : 0xFFFFFFFFULL;
+    regs->Rcx = (UINT64)g_Hv.ExitLogIndex;
+    regs->Rdx = (UINT64)g_Hv.VcpuCount;
+    AdvanceGuestRip();
+    return TRUE;
+  }
+
   // Every leaf — including the 0x40000000 hypervisor range — is answered by
   // running real CPUID and memoising it. A bare-metal CPU returns the highest
   // standard leaf's data for every out-of-range leaf, so all extended leaves
@@ -250,20 +261,12 @@ static void HandleNmi(void) {
 
 // ── External interrupt handler ──────────────────────────────────────────────
 //
-// With EXIT_CTRL_ACK_INT_ON_EXIT the processor acknowledges the interrupt
-// controller on the VM exit and stores the vector in EXIT_INTERRUPTION_INFO.
-// Re-inject it via ENTRY_INTERRUPTION_INFO so the guest receives the interrupt
-// exactly as it would on bare metal.
+// With ACK-on-exit disabled, we just need to open the interrupt window
+// so the host can deliver the interrupt. Do NOT advance RIP.
 
 static void HandleExternalInterrupt(void) {
-  UINT64 exitIntInfo = 0;
-  __vmx_vmread(VMCS_EXIT_INTERRUPTION_INFO, &exitIntInfo);
-
-  if (exitIntInfo & (1ULL << 31)) {
-    UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
-    UINT64 injectInfo = (UINT64)vector | (0ULL << 8) | (1ULL << 31);
-    __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
-  }
+  // Nothing to do — the interrupt will be delivered when the guest
+  // re-enables interrupts (or on the next VM-entry with interrupts enabled).
 }
 
 // ── VMCALL handler ──────────────────────────────────────────────────────────
@@ -427,7 +430,9 @@ static BOOLEAN HandleEptViolation(PVCPU vcpu) {
   // by tools/unit/hv_ept_decision_test.c against every (qual, entry-state)
   // tuple. HvDrv/hv_exit.c calls the same function, so a regression in either
   // tree's brick-critical branch fails the off-target suite.
-  EPT_PTE *entry = HvEptLookup4K(&g_Hv.Ept, gpa);
+  // HvEptEnsure4K dynamically splits any 2MB page backing this GPA, ensuring
+  // valid 4K PTE permissions can be manipulated without infinite-looping.
+  EPT_PTE *entry = HvEptEnsure4K(&g_Hv.Ept, gpa);
   HV_EPT_DECISION dec = HvEptDecide(
       qual,
       entry ? 1 : 0,
@@ -468,7 +473,10 @@ static BOOLEAN HandleEptViolation(PVCPU vcpu) {
     pfError |= 4;
   __vmx_vmwrite(VMCS_ENTRY_EXCEPTION_ERROR, pfError);
 
-  HvAsmWriteCr2(gla);
+  // Intel SDM Vol 3C §27.2.1: Bit 7 of qual indicates if Guest Linear Address is valid.
+  if (qual & (1ULL << 7)) {
+    HvAsmWriteCr2(gla);
+  }
 
   return TRUE;
 }
@@ -481,28 +489,12 @@ static void HandleRdmsr(PVCPU vcpu, PGUEST_REGS regs) {
 
   UINT64 val;
   switch (msr) {
-  case MSR_IA32_VMX_BASIC:
-  case MSR_IA32_VMX_PINBASED_CTLS:
-  case MSR_IA32_VMX_PROCBASED_CTLS:
-  case MSR_IA32_VMX_EXIT_CTLS:
-  case MSR_IA32_VMX_ENTRY_CTLS:
-  case MSR_IA32_VMX_MISC:
-  case MSR_IA32_VMX_CR0_FIXED0:
-  case MSR_IA32_VMX_CR0_FIXED1:
-  case MSR_IA32_VMX_CR4_FIXED0:
-  case MSR_IA32_VMX_CR4_FIXED1:
-  case MSR_IA32_VMX_VMCS_ENUM:
-  case MSR_IA32_VMX_PROCBASED_CTLS2:
-  case MSR_IA32_VMX_EPT_VPID_CAP:
-  case MSR_IA32_VMX_TRUE_PINBASED_CTLS:
-  case MSR_IA32_VMX_TRUE_PROCBASED_CTLS:
-  case MSR_IA32_VMX_TRUE_EXIT_CTLS:
-  case MSR_IA32_VMX_TRUE_ENTRY_CTLS:
-    val = 0;
-    break;
-
   case MSR_IA32_FEATURE_CONTROL:
     val = FEATURE_CONTROL_LOCKED;
+    break;
+
+  case MSR_IA32_EFER:
+    __vmx_vmread(VMCS_GUEST_EFER, &val);
     break;
 
   // NOTE: no 0x3B (IA32_TSC_ADJUST) case. The EFI VCPU deliberately has no
@@ -512,7 +504,13 @@ static void HandleRdmsr(PVCPU vcpu, PGUEST_REGS regs) {
   // stood still - a two-instruction VM test.
 
   default:
-    val = __readmsr(msr);
+    // Read hardware MSR safely. If the MSR is unmodeled or invalid on this CPU,
+    // HvAsmReadMsrSafe catches the host #GP without freezing root mode,
+    // allowing us to inject #GP(0) into the guest matching architectural behavior.
+    if (!HvAsmReadMsrSafe(msr, &val)) {
+      HvInjectGp();
+      return;
+    }
     break;
   }
 
@@ -549,11 +547,17 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   case MSR_IA32_VMX_TRUE_ENTRY_CTLS:
     HvInjectGp();
     return;
+  case MSR_IA32_EFER:
+    __vmx_vmwrite(VMCS_GUEST_EFER, val);
+    break;
   // NOTE: no 0x3B (IA32_TSC_ADJUST) write case. It passes through to
   // hardware untouched; shadowing it here would desync RDMSR from RDTSC
   // (see the read side above).
   default:
-    __writemsr(msr, val);
+    if (!HvAsmWriteMsrSafe(msr, val)) {
+      HvInjectGp();
+      return;
+    }
     break;
   }
   AdvanceGuestRip();
@@ -728,14 +732,20 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   UINT64 exitReason = 0;
   __vmx_vmread(VMCS_EXIT_REASON, &exitReason);
   UINT32 reason = (UINT32)(exitReason & 0xFFFF);
-#if DBG
+  if (exitReason & (1ULL << 31)) {
+    // Bit 31 indicates VM-entry failure (Intel SDM Vol 3C §24.9.1 / §27.1).
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+      UINT64 instrErr = 0;
+      __vmx_vmread(VMCS_VM_INSTR_ERROR, &instrErr);
+      g_Mailbox->VmresumeFailCount++;
+      g_Mailbox->VmresumeFailInstrErr = (UINT32)instrErr;
+    }
+  }
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
-#endif
 
   UINT64 rip = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
 
-#if DBG
   // Runtime Exit Log Ring Buffer (Pass 96)
   {
     UINT64 rsp = 0, qual = 0;
@@ -750,7 +760,6 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     g_Hv.ExitLog[ringSlot].ExitQualification = qual;
     g_Hv.ExitLog[ringSlot].Timestamp = __rdtsc();
   }
-#endif
 
   if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
     UINT32 idx = g_Mailbox->TotalExitCount & 15u;
@@ -884,19 +893,14 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   // loss (a dropped DR write, an unemulated IN) is acceptable as a survival
   // strategy for a control bit we never asked for.
   case EXIT_REASON_PENDING_INTERRUPT:
-    break;
-  case EXIT_REASON_TASK_SWITCH:
-  case EXIT_REASON_DR_ACCESS:
-  case EXIT_REASON_IO:
-  case EXIT_REASON_RDPMC:
-  case EXIT_REASON_RDTSC:
-  case EXIT_REASON_RSM:
-  case EXIT_REASON_MWAIT:
-  case EXIT_REASON_MONITOR:
-  case EXIT_REASON_GDTR_IDTR:
-  case EXIT_REASON_LDTR_TR:
-  case EXIT_REASON_RDTSCP:
-    AdvanceGuestRip();
+  case EXIT_REASON_APIC_WRITE:
+  case EXIT_REASON_VIRTUALIZED_EOI:
+  case EXIT_REASON_TPR_BELOW:
+  case EXIT_REASON_PML_FULL:
+  case EXIT_REASON_SPP_EVENT:
+  case EXIT_REASON_BUS_LOCK:
+  case EXIT_REASON_NOTIFICATION:
+  case EXIT_REASON_INSTRUCTION_TIMEOUT:
     break;
 
   case EXIT_REASON_INIT:
@@ -949,11 +953,18 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     __vmx_vmwrite(VMCS_GUEST_LDTR_LIMIT,  0xFFFF);
     __vmx_vmwrite(VMCS_GUEST_LDTR_ACCESS, 0x10000); // unusable
 
-    // TR: 16-bit busy TSS (type 3). Unrestricted guest in non-IA-32e mode
-    // requires type 3 or 11; keep the TSS base from the original VMCS setup
-    // so the descriptor still points at a valid in-memory TSS.
-    __vmx_vmwrite(VMCS_GUEST_TR_SEL,      0);
-    __vmx_vmwrite(VMCS_GUEST_TR_LIMIT,    0xFFFF);
+    // TR: 16-bit busy TSS (type 3) or 32-bit busy TSS (type 11 / 0x8B).
+    // Intel SDM Vol 3C §26.3.1.2: The selector field for TR must NOT be 0000H.
+    // Use the valid host TSS slot pre-allocated for this CPU at bring-up.
+    // Keep the TSS base from the original VMCS setup (points at &vcpu->Tss).
+    UINT16 tssSel = 0;
+    if (g_HvHostBaseTssSlot != 0 && vcpu != NULL) {
+      tssSel = g_HvHostBaseTssSlot + (UINT16)(vcpu->ProcessorIndex * 16u);
+    } else {
+      tssSel = 0x40; // Architectural non-zero TSS selector fallback
+    }
+    __vmx_vmwrite(VMCS_GUEST_TR_SEL,      (UINT64)tssSel);
+    __vmx_vmwrite(VMCS_GUEST_TR_LIMIT,    (UINT64)(sizeof(HV_TSS64) - 1));
     __vmx_vmwrite(VMCS_GUEST_TR_ACCESS,   0x8B); // present, busy 32-bit TSS
 
     // GDTR/IDTR: real-mode defaults (base 0, limit 0xFFFF). The AP
@@ -1048,6 +1059,10 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
 
   case EXIT_REASON_MCE_DURING_ENTRY:
     resume = HvDevirtualizeThisCpu(vcpu, HV_DEVIRT_MCE_DURING_ENTRY);
+    break;
+
+  case EXIT_REASON_MSR_LOADING:
+    resume = HvDevirtualizeThisCpu(vcpu, HV_DEVIRT_MSR_LOADING);
     break;
 
   default:

@@ -896,6 +896,37 @@ fail:
     return STATUS_INSUFFICIENT_RESOURCES;
 }
 
+// ── EPT Ensure 4KB entry (split dynamically if currently a 2MB large page) ──
+
+EPT_PTE *HvEptEnsure4K(PEPT_STATE ept, UINT64 gpa) {
+    UINT64 pml4i = (gpa >> EPT_PML4_SHIFT) & EPT_ENTRY_MASK;
+    if (!ept->Pml4[pml4i].Read) return NULL;
+
+    PEPT_PTE pdpt = (PEPT_PTE)EfiPaToVa(ept->Pml4[pml4i].PhysAddr << 12);
+    UINT64 pdpti = (gpa >> EPT_PDPT_SHIFT) & EPT_ENTRY_MASK;
+    if (!pdpt[pdpti].Read || pdpt[pdpti].LargePage) return NULL;
+
+    PEPT_PTE pd = (PEPT_PTE)EfiPaToVa(pdpt[pdpti].PhysAddr << 12);
+    UINT64 pdi = (gpa >> EPT_PD_SHIFT) & EPT_ENTRY_MASK;
+    if (!pd[pdi].Read) return NULL;
+
+    if (pd[pdi].LargePage) {
+        UINT64 regionBase = gpa & ~((1ULL << EPT_PD_SHIFT) - 1);
+        UINT32 regionTag = HvSplitRegionTag(regionBase);
+        if (HvSplitClaimTake((volatile long *)&ept->SplitClaim, regionTag)) {
+            NTSTATUS status = EptRuntimeSplit(ept, &pd[pdi], regionBase);
+            HvSplitClaimRelease((volatile long *)&ept->SplitClaim);
+            if (!NT_SUCCESS(status)) return NULL;
+        } else {
+            if (pd[pdi].LargePage) return NULL;
+        }
+    }
+
+    PEPT_PTE pt = (PEPT_PTE)EfiPaToVa(pd[pdi].PhysAddr << 12);
+    UINT64 pti = (gpa >> EPT_PT_SHIFT) & EPT_ENTRY_MASK;
+    return &pt[pti];
+}
+
 UINT32 HvEptFindHook(UINT64 gpa) {
     UINT64 page = gpa & ~0xFFFULL;
     // Every slot, not the first N: slots are reused now, so the installed hooks

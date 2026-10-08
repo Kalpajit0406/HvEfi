@@ -486,6 +486,19 @@ HvBootMailboxSetup (
   Out->LeftSeq   = 0;
   Out->LeftFlags = 0;
 
+  HV_MAILBOX leftover;
+  BOOLEAN hasLeftover = FALSE;
+
+  // Snapshot leftover BEFORE AllocatePages zeroes the memory
+  for (i = 0; i < sizeof (mFixedMailboxPa) / sizeof (mFixedMailboxPa[0]); i++) {
+    volatile HV_MAILBOX *candidate = (volatile HV_MAILBOX *)(UINTN)mFixedMailboxPa[i];
+    if (HvMailboxValid (candidate) && (HvMailboxSeq (candidate) != 0)) {
+      CopyMem (&leftover, (VOID *)(UINTN)candidate, sizeof (HV_MAILBOX));
+      hasLeftover = TRUE;
+      break;
+    }
+  }
+
   // Try fixed addresses first for warm-reset mailbox persistence (so the next
   // boot's HvBoot can read the stage a hung boot left behind). The 1-2 GB
   // range is safe DRAM on modern Intel laptops - the old 112-144 MB range
@@ -516,56 +529,48 @@ HvBootMailboxSetup (
 
   mb = (volatile HV_MAILBOX *)(UINTN)pa;
 
-  // Report a leftover BEFORE re-arming the page. A leftover with a non-zero
-  // write sequence means the previous boot WROTE stages and the page was not
-  // re-initialised afterwards - i.e. that boot did not come back through this
-  // function's normal path (it hung, or was reset).
-  if (HvMailboxValid (mb) && (HvMailboxSeq (mb) != 0)) {
-    Out->LeftStage = mb->Stage;
-    Out->LeftSeq   = HvMailboxSeq (mb);
-    Out->LeftFlags = HvMailboxFlags (mb);
-    if (mb->DevirtCount > 0) {
-      HvBootReceiptNum (Vol, "LAST DEVIRT count", mb->DevirtCount);
-      HvBootReceiptNum (Vol, "LAST DEVIRT cause", mb->DevirtCause);
-      HvBootReceiptNum (Vol, "LAST DEVIRT reason", mb->DevirtExitReason);
-      HvBootReceiptNum (Vol, "LAST DEVIRT qual_lo", mb->DevirtExitQualLow);
-      HvBootReceiptNum (Vol, "LAST DEVIRT qual_hi", mb->DevirtExitQualHigh);
-      HvBootReceiptNum (Vol, "LAST DEVIRT rip_lo", mb->DevirtGuestRipLow);
-      HvBootReceiptNum (Vol, "LAST DEVIRT rip_hi", mb->DevirtGuestRipHigh);
-      HvBootReceiptNum (Vol, "LAST DEVIRT rsp_lo", mb->DevirtGuestRspLow);
-      HvBootReceiptNum (Vol, "LAST DEVIRT rsp_hi", mb->DevirtGuestRspHigh);
-      HvBootReceiptNum (Vol, "LAST DEVIRT cr0_lo", mb->DevirtGuestCr0Low);
-      HvBootReceiptNum (Vol, "LAST DEVIRT cr4_lo", mb->DevirtGuestCr4Low);
-      HvBootReceiptNum (Vol, "LAST DEVIRT efer_lo", mb->DevirtGuestEferLow);
-      HvBootReceiptNum (Vol, "LAST DEVIRT cpu", mb->DevirtCpuIndex);
-      HvBootReceiptNum (Vol, "LAST DEVIRT apic", mb->DevirtApicId);
+  // Report a leftover BEFORE re-arming the page.
+  if (hasLeftover) {
+    Out->LeftStage = leftover.Stage;
+    Out->LeftSeq   = (leftover.FlagsSeq >> 16);
+    Out->LeftFlags = (leftover.FlagsSeq & 0xFFFFu);
+    if (leftover.DevirtCount > 0) {
+      HvBootReceiptNum (Vol, "LAST DEVIRT count", leftover.DevirtCount);
+      HvBootReceiptNum (Vol, "LAST DEVIRT cause", leftover.DevirtCause);
+      HvBootReceiptNum (Vol, "LAST DEVIRT reason", leftover.DevirtExitReason);
+      HvBootReceiptNum (Vol, "LAST DEVIRT qual_lo", leftover.DevirtExitQualLow);
+      HvBootReceiptNum (Vol, "LAST DEVIRT qual_hi", leftover.DevirtExitQualHigh);
+      HvBootReceiptNum (Vol, "LAST DEVIRT rip_lo", leftover.DevirtGuestRipLow);
+      HvBootReceiptNum (Vol, "LAST DEVIRT rip_hi", leftover.DevirtGuestRipHigh);
+      HvBootReceiptNum (Vol, "LAST DEVIRT rsp_lo", leftover.DevirtGuestRspLow);
+      HvBootReceiptNum (Vol, "LAST DEVIRT rsp_hi", leftover.DevirtGuestRspHigh);
+      HvBootReceiptNum (Vol, "LAST DEVIRT cr0_lo", leftover.DevirtGuestCr0Low);
+      HvBootReceiptNum (Vol, "LAST DEVIRT cr4_lo", leftover.DevirtGuestCr4Low);
+      HvBootReceiptNum (Vol, "LAST DEVIRT efer_lo", leftover.DevirtGuestEferLow);
+      HvBootReceiptNum (Vol, "LAST DEVIRT cpu", leftover.DevirtCpuIndex);
+      HvBootReceiptNum (Vol, "LAST DEVIRT apic", leftover.DevirtApicId);
     }
-    if (mb->VmresumeFailCount > 0) {
-      HvBootReceiptNum (Vol, "LAST VMRESUME fails", mb->VmresumeFailCount);
-      HvBootReceiptNum (Vol, "LAST VMRESUME err", mb->VmresumeFailInstrErr);
+    if (leftover.VmresumeFailCount > 0) {
+      HvBootReceiptNum (Vol, "LAST VMRESUME fails", leftover.VmresumeFailCount);
+      HvBootReceiptNum (Vol, "LAST VMRESUME err", leftover.VmresumeFailInstrErr);
     }
-    if (mb->HypercallCount > 0) {
-      HvBootReceiptNum (Vol, "LAST HCALL count", mb->HypercallCount);
-      HvBootReceiptNum (Vol, "LAST HCALL last_id", mb->LastHypercallId);
-      HvBootReceiptNum (Vol, "LAST HCALL status", mb->LastHypercallStatus);
-      HvBootReceiptNum (Vol, "LAST HCALL magic_lo", mb->LastHypercallMagicLow);
-      HvBootReceiptNum (Vol, "LAST HCALL magic_hi", mb->LastHypercallMagicHigh);
+    if (leftover.HypercallCount > 0) {
+      HvBootReceiptNum (Vol, "LAST HCALL count", leftover.HypercallCount);
+      HvBootReceiptNum (Vol, "LAST HCALL last_id", leftover.LastHypercallId);
+      HvBootReceiptNum (Vol, "LAST HCALL status", leftover.LastHypercallStatus);
+      HvBootReceiptNum (Vol, "LAST HCALL magic_lo", leftover.LastHypercallMagicLow);
+      HvBootReceiptNum (Vol, "LAST HCALL magic_hi", leftover.LastHypercallMagicHigh);
     }
-    if (mb->TotalExitCount > 0) {
+    if (leftover.TotalExitCount > 0) {
       UINT32 lastIdx;
-      HvBootReceiptNum (Vol, "LAST EXITS total", mb->TotalExitCount);
-      lastIdx = (mb->TotalExitCount - 1u) & 15u;
-      HvBootReceiptNum (Vol, "LAST EXIT reason", mb->LastExitReason[lastIdx]);
-      HvBootReceiptNum (Vol, "LAST EXIT cpu", mb->LastExitCpu[lastIdx]);
-      HvBootReceiptNum (Vol, "LAST EXIT rip_lo", mb->LastExitRipLow[lastIdx]);
-      HvBootReceiptNum (Vol, "LAST EXIT rip_hi", mb->LastExitRipHigh[lastIdx]);
+      HvBootReceiptNum (Vol, "LAST EXITS total", leftover.TotalExitCount);
+      lastIdx = (leftover.TotalExitCount - 1u) & 15u;
+      HvBootReceiptNum (Vol, "LAST EXIT reason", leftover.LastExitReason[lastIdx]);
+      HvBootReceiptNum (Vol, "LAST EXIT cpu", leftover.LastExitCpu[lastIdx]);
+      HvBootReceiptNum (Vol, "LAST EXIT rip_lo", leftover.LastExitRipLow[lastIdx]);
+      HvBootReceiptNum (Vol, "LAST EXIT rip_hi", leftover.LastExitRipHigh[lastIdx]);
     }
   } else if (HvMailboxValid (mb)) {
-    // Diagnostic: the magic is valid (so a prior HvBoot DID initialise this
-    // page) but seq==0 means the driver's entry point never wrote to the
-    // mailbox. This is the critical "StartImage transferred control but the
-    // driver's HV_POST 0xB1/0xB2/mailbox-write never ran" signature - the
-    // hang is BEFORE the driver's own code or inside DXE core's StartImage.
     HvBootReceiptLine (Vol, "CORE LAST none (prev driver did not run)");
   }
 

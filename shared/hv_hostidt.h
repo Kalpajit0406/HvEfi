@@ -149,6 +149,14 @@ UINT32 HvBuildHostIdt(UINT8 *idt, UINT32 idtBytes,
     return HV_IDT_ENTRIES;
 }
 
+// Override or set a single gate in an existing host IDT.
+static __inline
+void HvIdtSetGate(UINT8 *idt, UINT32 vector, UINT64 handler, UINT16 selector)
+{
+    if (idt == 0 || vector >= HV_IDT_ENTRIES || handler == 0 || selector == 0) return;
+    HvIdtFillGate(idt + (vector * HV_IDT_GATE_BYTES), handler, selector);
+}
+
 // ── Host GDT ─────────────────────────────────────────────────────────────────
 
 // Copy the live firmware GDT into memory the hypervisor owns, preserving the

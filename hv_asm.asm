@@ -66,6 +66,7 @@ HV_XSAVE_AREA   EQU  4000h
 EXTERN HvExitHandler : PROC
 EXTERN HvCaptureUnloadState : PROC
 EXTERN HvUnloadRestoreState : PROC
+EXTERN HvHostException : PROC
 
 ; Extended-state save policy, resolved once at init in HvVmxInitialize so the
 ; exit path never executes CPUID. A CPUID on every exit and every resume added
@@ -611,5 +612,97 @@ _invvpid_fail:
     mov     eax, 1
     ret
 HvAsmInvvpid ENDP
+
+; ---------------------------------------------------------------------------
+; Safe MSR access functions + host #GP handler for VMX root mode.
+;
+; Intel SDM Vol 3C: When an unmodeled or invalid MSR is read or written in
+; VMX root mode, the CPU raises #GP(0) (vector 13).
+; If unhandled, host IDT halts the CPU.
+; HvAsmHostGpHandler intercepts the #GP on the faulting instruction,
+; fixes up the return RIP to the fault label, and resumes via iretq.
+; The C caller then injects #GP(0) into the guest.
+; ---------------------------------------------------------------------------
+
+PUBLIC HvAsmReadMsrSafe
+PUBLIC HvAsmReadMsrSafe_Point
+PUBLIC HvAsmReadMsrSafe_Fault
+PUBLIC HvAsmWriteMsrSafe
+PUBLIC HvAsmWriteMsrSafe_Point
+PUBLIC HvAsmWriteMsrSafe_Fault
+PUBLIC HvAsmHostGpHandler
+
+HvAsmReadMsrSafe PROC
+    push    rbx
+    mov     r8, rdx                 ; save outVal pointer to r8
+HvAsmReadMsrSafe_Point::
+    rdmsr                           ; edx:eax = MSR[ecx]
+    shl     rdx, 32
+    or      rax, rdx
+    mov     qword ptr [r8], rax     ; *outVal = rax
+    mov     al, 1                   ; return TRUE
+    pop     rbx
+    ret
+
+HvAsmReadMsrSafe_Fault::
+    xor     al, al                  ; return FALSE
+    pop     rbx
+    ret
+HvAsmReadMsrSafe ENDP
+
+HvAsmWriteMsrSafe PROC
+    mov     eax, edx                ; low 32 bits into eax
+    shr     rdx, 32                 ; high 32 bits into edx
+HvAsmWriteMsrSafe_Point::
+    wrmsr                           ; MSR[ecx] = edx:eax
+    mov     al, 1                   ; return TRUE
+    ret
+
+HvAsmWriteMsrSafe_Fault::
+    xor     al, al                  ; return FALSE
+    ret
+HvAsmWriteMsrSafe ENDP
+
+HvAsmHostGpHandler PROC
+    ; Exception stack frame at CPL 0 (vector 13 with error code):
+    ; [rsp + 0]  = error code
+    ; [rsp + 8]  = RIP
+    ; [rsp + 16] = CS
+    ; [rsp + 24] = RFLAGS
+    ; [rsp + 32] = RSP
+    ; [rsp + 40] = SS
+    push    rax
+    push    r11
+    mov     rax, qword ptr [rsp + 24]    ; faulting RIP (rsp + 8 + 16)
+    lea     r11, [HvAsmReadMsrSafe_Point]
+    cmp     rax, r11
+    je      _is_safe_rdmsr
+    lea     r11, [HvAsmWriteMsrSafe_Point]
+    cmp     rax, r11
+    je      _is_safe_wrmsr
+
+    ; Not from safe MSR points: genuine host exception, log and halt
+    pop     r11
+    pop     rax
+    add     rsp, 8                      ; drop error code
+    call    HvHostException
+    hlt
+
+_is_safe_rdmsr:
+    lea     r11, [HvAsmReadMsrSafe_Fault]
+    mov     qword ptr [rsp + 24], r11   ; replace return RIP with fault handler
+    pop     r11
+    pop     rax
+    add     rsp, 8                      ; drop error code
+    iretq
+
+_is_safe_wrmsr:
+    lea     r11, [HvAsmWriteMsrSafe_Fault]
+    mov     qword ptr [rsp + 24], r11   ; replace return RIP with fault handler
+    pop     r11
+    pop     rax
+    add     rsp, 8                      ; drop error code
+    iretq
+HvAsmHostGpHandler ENDP
 
 END
