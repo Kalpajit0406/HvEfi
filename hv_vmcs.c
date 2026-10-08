@@ -236,8 +236,22 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
         PROC_BASED_USE_TSC_OFFSET,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
-    HvVmWriteChecked(VMCS_TSC_OFFSET,
-                  (UINT64)(INT64)(g_Hv.TscBootOffset ^ (INT64)vcpu->ProcessorIndex));
+    // TSC offset. When the base shift is non-zero (WDK build, per-boot
+    // random), XOR with the CPU index so each core gets a slightly
+    // different offset - that's the stealth property. When the base is
+    // ZERO (EFI build - the comment in hv_efi_vmx.c explains why), DO
+    // NOT XOR: `0 ^ cpu_index == cpu_index`, which left each CPU's TSC
+    // offset at its own index value instead of the designed zero. CPUs
+    // 1-15 then ran with their RDTSC skewed by 1-15 ticks from the APIC
+    // deadlines and from CPU 0 - small, but enough to break Windows's
+    // early-boot cross-CPU TSC-consistency assertions on some kernels.
+    // Pass 101.
+    {
+        INT64 tscOffset = g_Hv.TscBootOffset;
+        if (tscOffset != 0)
+            tscOffset ^= (INT64)vcpu->ProcessorIndex;
+        HvVmWriteChecked(VMCS_TSC_OFFSET, (UINT64)tscOffset);
+    }
 
     // Secondary: EPT, VPID, RDTSCP, INVPCID, XSAVES, unrestricted guest.
     // Unrestricted guest is required for INIT-SIPI AP bringup: the OS sends

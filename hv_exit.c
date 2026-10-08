@@ -13,6 +13,11 @@
 #include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
 #include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
 
+// Port-0x80 exit telemetry (Pass 101). Forward-declared here instead of
+// including hv_efi.h, which pulls in EDK2 headers; this file is kept free
+// of OS-specific headers per the top comment.
+void __outbyte(unsigned short Port, unsigned char Data);
+
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
 static void AdvanceGuestRip(void) {
@@ -880,6 +885,24 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   // compile with "struct HV_GLOBAL has no field named 'ExitCounts'".
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 #endif
+
+  // Port-0x80 exit telemetry (Pass 101).
+  //
+  // A POST card attached to port 0x80 displays the LAST byte written there.
+  // Writing the exit reason on every VM exit means the final state of the
+  // display reflects what Windows (or anything running as guest) was last
+  // trying to do when it stopped running - which is the single most useful
+  // piece of information for diagnosing a silent hang that produces no
+  // BSOD and no receipt line past CHAIN WIN slot start.
+  //
+  // Cost: ~1 OUT instruction per exit. On modern CPUs an OUT to a non-
+  // listener port costs ~500ns; typical Windows boot generates ~10K VM exits
+  // per second, so this is ~0.5% slower boot. Harmless on systems without a
+  // POST card listener. We OR 0x40 into the reason so the 0..75 exit-reason
+  // range maps to 0x40..0x8B - above the HV_POST stage codes (0xB0..0xC5)
+  // and failure codes (0xE2..0xEC) so a glance at the POST card can tell a
+  // boot-stage code from a running-guest exit code.
+  __outbyte(0x80, (unsigned char)(0x40 | (reason & 0x3F)));
 
   UINT64 rip = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
