@@ -661,25 +661,11 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
 
     // If the BSP itself failed to launch, skip the APs: the count check below
     // triggers the rollback path regardless, and attempting AP bring-up would
-    // only burn the per-AP timeout (plus a VMXON/VMLAUNCH cycle per AP) for
-    // nothing.
+    // only burn the 5 s timeout (plus a VMXON/VMLAUNCH cycle per AP) for nothing.
     if (g_Hv.VcpuCount > 1 && (UINT32)g_VmxonSuccess > 0) {
         // Dispatch each AP individually via StartupThisAP so the handle is
         // passed explicitly as context — WhoAmI is broken on the Dell G15
         // firmware and GetProcessorInfo reports IDs that do not match CPUID.
-        //
-        // Per-AP timeout: 2 s. StartupThisAP (NULL WaitEvent) is blocking, so
-        // the BSP walks the APs sequentially, and the total bring-up budget is
-        // (VcpuCount - 1) * timeout. The firmware watchdog is 120 s, armed in
-        // the entry point before this function is called, so the sequential
-        // bound must stay well under that. On the 16-thread Dell target 15 x
-        // 2s = 30 s - roomy. A single VMLAUNCH on a modern core completes in
-        // milliseconds; 2 s is a generous ceiling for the full
-        // VMXON/VMCLEAR/VMPTRLD/VMCS-setup/VMLAUNCH sequence that each AP
-        // runs. The old 5 s value gave 75 s on a 16-thread chip, which was
-        // uncomfortably close to the watchdog and prevented margin for a
-        // slow MSR path on the per-AP critical path.
-        const UINTN kPerApTimeoutUs = 2000000;   // 2 s
         for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
             if (h == (UINTN)bspHandle) continue;
             EFI_STATUS st = gEfiMp->StartupThisAP(
@@ -687,7 +673,7 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
                 ApVirtualizeCallback,
                 h,                              // ProcessorNumber
                 NULL,                           // WaitEvent (blocking)
-                kPerApTimeoutUs,                // per-AP timeout (microseconds)
+                5000000,                        // 5 s timeout per AP
                 (PVOID)(UINTN)(h + 1),          // handle encoded as h+1
                 NULL                            // Finished
             );

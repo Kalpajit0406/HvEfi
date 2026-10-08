@@ -64,8 +64,4 @@
 [BuildOptions]
   # Match HvEfi: intrinsics on, security cookie off (no CRT), strict preprocessor.
   MSFT:*_*_X64_CC_FLAGS = /O2 /GS- /Oi /wd4201 /Zc:preprocessor
-  # CLANGPDB cross-build (Linux). No -include shim here: HvBoot.c uses only
-  # EDK2 BaseLib + MdePkg protocols, no MSVC intrinsics beyond those EDK2
-  # provides on every supported toolchain. The warning disables mirror the
-  # HvEfi set.
-  CLANGPDB:*_*_X64_CC_FLAGS = -O2 -mno-red-zone -fshort-wchar -fno-stack-protector -Wno-microsoft-anon-tag -Wno-microsoft-inconsistent-dllimport -Wno-pragma-pack -Wno-ignored-attributes -Wno-incompatible-library-redeclaration -Wno-nonportable-include-path -Wno-microsoft-cast -Wno-missing-prototypes -Wno-missing-declarations -Wno-strict-prototypes -Wno-unused-command-line-argument
+  MSFT:*_*_X64_DLINK_FLAGS = /PDBALTPATH:HvBoot.pdb

@@ -759,52 +759,6 @@ UINT64 HvHypercallDispatch(PVCPU vcpu, UINT64 magic, UINT64 id, UINT64 p1,
             result = HcEptUnhook(p1);
             break;
 
-        case HV_HYPERCALL_REGISTER_DEVIRT_VA: {
-            // Cooperative post-EBS devirt (Open Issue 2 true path).
-            //
-            // A kernel-mode driver that wants a working post-EBS unload
-            // tells us a GUEST kernel VA that maps the same physical page
-            // as HvAsmSwitchToGuest. We record it; the exit handler, when
-            // it decides to really devirt post-EBS, uses that VA for the
-            // instruction fetch that follows `mov cr3`. The fail-safe
-            // (inject #UD) remains for callers that never register one.
-            //
-            // Validation: p1 must be a canonical kernel VA (bit 47 → 63
-            // all one) and map, through the current guest CR3, to the
-            // same physical page as HvAsmSwitchToGuest. If the walk
-            // confirms both, record; otherwise reject and leave the
-            // fail-safe in place.
-            UINT64 kernelVa = p1;
-            SIZE_T guestCr3Raw = 0;
-            __vmx_vmread(VMCS_GUEST_CR3, &guestCr3Raw);
-            UINT64 callerCr3 = (UINT64)guestCr3Raw;
-
-            // Canonical kernel-half check: top 17 bits must be 1.
-            if (((INT64)kernelVa >> 47) != -1) {
-                result = HV_STATUS_INVALID_PARAM;
-                break;
-            }
-
-            UINT64 stubPa = (UINT64)(UINTN)&HvAsmSwitchToGuest & ~0xFFFULL;
-            UINT64 mappedPa = HvPtWalk(ReadPteAtPa, NULL,
-                                       callerCr3, kernelVa, 0);
-            if (mappedPa == HV_PA_INVALID ||
-                (mappedPa & ~0xFFFULL) != stubPa) {
-                result = HV_STATUS_INVALID_PARAM;
-                break;
-            }
-
-            // Record the kernel VA aligned to the stub's exact entry
-            // address: p1 is a page-base, and the stub lives at some
-            // offset inside that page, so we add the known offset so the
-            // exit handler can jump directly to the function entry. The
-            // asm shutdown path reads this through external linkage.
-            extern UINT64 g_HvDevirtKernelStubVa;
-            g_HvDevirtKernelStubVa = (kernelVa & ~0xFFFULL) |
-                ((UINT64)(UINTN)&HvAsmSwitchToGuest & 0xFFFULL);
-            result = HV_STATUS_SUCCESS;
-        } break;
-
         case HV_HYPERCALL_QUERY_EXIT_TELEMETRY: {
             // p1 = user buffer VA, p2 = max records (clamped to 64)
             UINT64 userBufVa = p1;
@@ -856,8 +810,7 @@ UINT64 HvHypercallDispatch(PVCPU vcpu, UINT64 magic, UINT64 id, UINT64 p1,
                                (1U << HV_HYPERCALL_QUERY_EXIT_TELEMETRY) |
                                (1U << HV_HYPERCALL_GET_TOKEN)            |
                                (1U << HV_HYPERCALL_EPT_HOOK)             |
-                               (1U << HV_HYPERCALL_EPT_UNHOOK)             |
-                               (1U << HV_HYPERCALL_REGISTER_DEVIRT_VA);
+                               (1U << HV_HYPERCALL_EPT_UNHOOK);
             result = (UINT64)HV_ABI_VERSION | ((UINT64)supported << 16);
             break;
         }

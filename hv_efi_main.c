@@ -869,6 +869,21 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     EfiPrint("[+] Step 8: VMX initialized (%u CPUs, EPT ready)\n", g_Hv.VcpuCount);
     HvReportStage(HV_STAGE_VMXINIT_OK, g_Hv.VcpuCount);
 
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        UINT64 maxPhys = 0;
+        for (UINT32 ri = 0; ri < g_Hv.Ept.RamRangeCount; ri++) {
+            UINT64 end = (UINT64)g_Hv.Ept.RamRanges[ri].BaseAddress.QuadPart +
+                         (UINT64)g_Hv.Ept.RamRanges[ri].NumberOfBytes.QuadPart;
+            if (end > maxPhys) maxPhys = end;
+        }
+        g_Mailbox->EptPml4Units     = g_Hv.Ept.PdptUnitCount;
+        g_Mailbox->EptRamRangeCount = g_Hv.Ept.RamRangeCount;
+        g_Mailbox->EptMaxPhysLow    = (unsigned int)(maxPhys & 0xFFFFFFFFu);
+        g_Mailbox->EptMaxPhysHigh   = (unsigned int)(maxPhys >> 32);
+        g_Mailbox->EptSplitCount    = g_Hv.Ept.SplitCount;
+        g_Mailbox->EptGbMapped      = g_Hv.Ept.PdptCount;
+    }
+
     // ── Step 9: Collect hidden pages ────────────────────────────────────────
     g_Hv.HiddenPageCount = 0;
 
@@ -1027,6 +1042,14 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     }
     EfiPrint("[+] Step 12: All %u CPUs virtualized\n", g_Hv.VcpuCount);
     HvReportStage(HV_STAGE_VIRT_OK, g_Hv.VcpuCount);
+
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        g_Mailbox->ActualPinCtls    = g_Hv.ActualPinCtls;
+        g_Mailbox->ActualProcCtls   = g_Hv.ActualProcCtls;
+        g_Mailbox->ActualExitCtls   = g_Hv.ActualExitCtls;
+        g_Mailbox->ActualProcCtls2  = g_Hv.ActualProcCtls2;
+        g_Mailbox->HostFaultCount   = g_HvHostFaultSeen;
+    }
 
     // ── Step 12b: Boot self-test (deliberately absent in EFI build) ──────────
     // The WDK driver issues HV_HYPERCALL_DETECT from kernel mode (BSP, guest

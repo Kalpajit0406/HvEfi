@@ -27,14 +27,6 @@ HV_GLOBAL g_Hv = {0};
 UINT32 g_HvStateSaveMode = 0;
 UINT32 g_HvStateSaveMask = 0;
 
-// Open Issue 2 cooperative devirt target. Non-zero when a kernel driver has
-// registered a GUEST VA (via HV_HYPERCALL_REGISTER_DEVIRT_VA) that maps the
-// physical page of HvAsmSwitchToGuest. The asm shutdown path reads this
-// through external linkage - the asm cannot indirect through a g_Hv struct
-// field without hand-rolling the offset. 0 = no registration, fall back to
-// the firmware VA (which the firmware's identity map still covers until EBS).
-UINT64 g_HvDevirtKernelStubVa = 0;
-
 // The environment snapshot the shared decision (hv_xsave.h) consumes. Retained
 // after refresh so HandleXsetbv can apply the same fit rule to a guest's new
 // XCR0 before it reaches the real XSETBV.

@@ -99,11 +99,8 @@ static UINT32 AdjustControls(UINT32 desired, UINT32 msrIndex) {
 // exit handler's code does, so the tables outlive the OS.
 
 static UINT8 g_HvHostIdt[HV_IDT_ENTRIES * HV_IDT_GATE_BYTES];
-// External linkage: hv_exit.c's SIPI handler reads these so a strict Intel
-// CPU validator (hybrid Raptor Lake E-cores notably) sees a GDT that
-// actually contains the TR descriptor at tssSel on VM entry.
-UINT8  g_HvHostGdt[HV_HOST_GDT_MAX_BYTES];
-UINT32 g_HvHostGdtLimit = 0;
+static UINT8 g_HvHostGdt[HV_HOST_GDT_MAX_BYTES];
+static UINT32 g_HvHostGdtLimit = 0;
 UINT16 g_HvHostBaseTssSlot = 0;
 static BOOLEAN g_HvHostTablesInitialized = FALSE;
 
@@ -239,22 +236,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
         PROC_BASED_USE_TSC_OFFSET,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
-    // TSC offset. When the base shift is non-zero (WDK build, per-boot
-    // random), XOR with the CPU index so each core gets a slightly
-    // different offset - that's the stealth property. When the base is
-    // ZERO (EFI build - the comment in hv_efi_vmx.c explains why), DO
-    // NOT XOR: `0 ^ cpu_index == cpu_index`, which left each CPU's TSC
-    // offset at its own index value instead of the designed zero. CPUs
-    // 1-15 then ran with their RDTSC skewed by 1-15 ticks from the APIC
-    // deadlines and from CPU 0 - small, but enough to break Windows's
-    // early-boot cross-CPU TSC-consistency assertions on some kernels.
-    // Pass 101.
-    {
-        INT64 tscOffset = g_Hv.TscBootOffset;
-        if (tscOffset != 0)
-            tscOffset ^= (INT64)vcpu->ProcessorIndex;
-        HvVmWriteChecked(VMCS_TSC_OFFSET, (UINT64)tscOffset);
-    }
+    HvVmWriteChecked(VMCS_TSC_OFFSET,
+                  (UINT64)(INT64)(g_Hv.TscBootOffset ^ (INT64)vcpu->ProcessorIndex));
 
     // Secondary: EPT, VPID, RDTSCP, INVPCID, XSAVES, unrestricted guest.
     // Unrestricted guest is required for INIT-SIPI AP bringup: the OS sends
@@ -279,7 +262,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     }
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS2, procCtls2);
 
-    // Exit controls: 64-bit host, save/load EFER/PAT, ACK interrupt on exit.
+    // Exit controls: 64-bit host, save/load EFER/PAT.
     //
     // IA32_PERF_GLOBAL_CTRL is deliberately NOT in the load/save set. This is a
     // partitioned hypervisor: the "guest" is the real Windows system and the
@@ -291,18 +274,6 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // disables all hardware counters for the machine (and is a loud tell).
     // Leaving the control clear means VMX never touches the MSR at all, so the
     // PMU stays transparent across every exit/entry without a bitmap trap.
-    //
-    // ACK_INT_ON_EXIT is in the desired set because some CPUs (notably Raptor
-    // Lake, FIXED0 bit 0) force PIN_BASED_EXT_INT_EXIT=1 whether we ask for it
-    // or not. Without ACK, every external interrupt exits to the host, the
-    // interrupt stays pending in the LAPIC, VM-entry delivers it again, exits
-    // again — an infinite loop that reads from outside as "boot hung". With
-    // ACK=1 the CPU acknowledges on exit and stores the vector in
-    // VMCS_EXIT_INTERRUPTION_INFO; HandleExternalInterrupt re-injects it via
-    // VMCS_ENTRY_INTERRUPTION_INFO so the guest still sees it. CPUs that do
-    // NOT force PIN_BASED_EXT_INT_EXIT never take the exit, so the handler is
-    // dormant; CPUs whose capability MSR disallows ACK have the bit stripped
-    // by AdjustControls, and HandleExternalInterrupt's early-out is harmless.
     UINT32 exitCtls = AdjustControls(
         EXIT_CTRL_HOST_ADDR_SPACE_SIZE | EXIT_CTRL_SAVE_EFER |
         EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT |
@@ -318,6 +289,13 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
         ENTRY_CTRL_IA32E_MODE_GUEST | ENTRY_CTRL_LOAD_EFER | ENTRY_CTRL_LOAD_PAT,
         MSR_IA32_VMX_TRUE_ENTRY_CTLS);
     HvVmWriteChecked(VMCS_ENTRY_CONTROLS, entryCtls);
+
+    if (vcpu->ProcessorIndex == 0) {
+        g_Hv.ActualPinCtls   = pinCtls;
+        g_Hv.ActualProcCtls  = procCtls;
+        g_Hv.ActualExitCtls  = exitCtls;
+        g_Hv.ActualProcCtls2 = procCtls2;
+    }
 
     // ── Control fields ──────────────────────────────────────────────────
 

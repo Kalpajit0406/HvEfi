@@ -169,16 +169,33 @@ typedef struct {
     // Core Exclusion Mask (Pass 96)
     unsigned int CoreExclusionMaskLow;
     unsigned int CoreExclusionMaskHigh;
+
+    // EPT Coverage Diagnostics (Pass 105)
+    unsigned int EptPml4Units;
+    unsigned int EptRamRangeCount;
+    unsigned int EptMaxPhysLow;
+    unsigned int EptMaxPhysHigh;
+    unsigned int EptSplitCount;
+    unsigned int EptGbMapped;
+
+    // VMCS Control Diagnostics (Pass 106)
+    unsigned int ActualPinCtls;
+    unsigned int ActualProcCtls;
+    unsigned int ActualExitCtls;
+    unsigned int ActualProcCtls2;
+
+    // Host fault counter (Pass 107)
+    unsigned int HostFaultCount;
 } HV_MAILBOX;
 
 // Core Exclusion Mask accessors
-static __inline unsigned long long HvMailboxCoreExclusionMaskGet(const volatile HV_MAILBOX *mb)
+static __inline unsigned __int64 HvMailboxCoreExclusionMaskGet(const volatile HV_MAILBOX *mb)
 {
     if (mb == 0) return 0;
-    return (unsigned long long)mb->CoreExclusionMaskLow | ((unsigned long long)mb->CoreExclusionMaskHigh << 32);
+    return (unsigned __int64)mb->CoreExclusionMaskLow | ((unsigned __int64)mb->CoreExclusionMaskHigh << 32);
 }
 
-static __inline void HvMailboxCoreExclusionMaskSet(volatile HV_MAILBOX *mb, unsigned long long mask)
+static __inline void HvMailboxCoreExclusionMaskSet(volatile HV_MAILBOX *mb, unsigned __int64 mask)
 {
     if (mb == 0) return;
     mb->CoreExclusionMaskLow = (unsigned int)(mask & 0xFFFFFFFFu);

@@ -562,13 +562,21 @@ HvBootMailboxSetup (
       HvBootReceiptNum (Vol, "LAST HCALL magic_hi", leftover.LastHypercallMagicHigh);
     }
     if (leftover.TotalExitCount > 0) {
-      UINT32 lastIdx;
+      UINT32 lastIdx, ri;
       HvBootReceiptNum (Vol, "LAST EXITS total", leftover.TotalExitCount);
       lastIdx = (leftover.TotalExitCount - 1u) & 15u;
       HvBootReceiptNum (Vol, "LAST EXIT reason", leftover.LastExitReason[lastIdx]);
       HvBootReceiptNum (Vol, "LAST EXIT cpu", leftover.LastExitCpu[lastIdx]);
       HvBootReceiptNum (Vol, "LAST EXIT rip_lo", leftover.LastExitRipLow[lastIdx]);
       HvBootReceiptNum (Vol, "LAST EXIT rip_hi", leftover.LastExitRipHigh[lastIdx]);
+      for (ri = 0; ri < 16; ri++) {
+        UINT32 slot = (leftover.TotalExitCount - 16u + ri) & 15u;
+        HvBootReceiptNum (Vol, "LAST RING reason", leftover.LastExitReason[slot]);
+      }
+    }
+    if (leftover.ActualPinCtls != 0 || leftover.ActualExitCtls != 0) {
+      HvBootReceiptNum (Vol, "LAST VMCS pin", leftover.ActualPinCtls);
+      HvBootReceiptNum (Vol, "LAST VMCS exit", leftover.ActualExitCtls);
     }
   } else if (HvMailboxValid (mb)) {
     HvBootReceiptLine (Vol, "CORE LAST none (prev driver did not run)");
@@ -1272,6 +1280,26 @@ HvBootMain (
     if (HvMailboxValid (mb) && (HvMailboxSeq (mb) != 0)) {
       HvBootReceiptNum (vol, "CORE stage", (UINT32)mb->Stage);
       HvBootReceiptNum (vol, "CORE detail", (UINT32)mb->Detail);
+      if (mb->EptPml4Units != 0) {
+        HvBootReceiptNum (vol, "EPT units", mb->EptPml4Units);
+        HvBootReceiptNum (vol, "EPT ranges", mb->EptRamRangeCount);
+        HvBootReceiptNum (vol, "EPT maxphys_lo", mb->EptMaxPhysLow);
+        HvBootReceiptNum (vol, "EPT maxphys_hi", mb->EptMaxPhysHigh);
+        HvBootReceiptNum (vol, "EPT splits", mb->EptSplitCount);
+        HvBootReceiptNum (vol, "EPT gb", mb->EptGbMapped);
+      }
+      if (mb->ActualPinCtls != 0 || mb->ActualExitCtls != 0) {
+        HvBootReceiptNum (vol, "VMCS pin", mb->ActualPinCtls);
+        HvBootReceiptNum (vol, "VMCS proc", mb->ActualProcCtls);
+        HvBootReceiptNum (vol, "VMCS exit", mb->ActualExitCtls);
+        HvBootReceiptNum (vol, "VMCS proc2", mb->ActualProcCtls2);
+      }
+      if (mb->TotalExitCount != 0)
+        HvBootReceiptNum (vol, "EXITS total", mb->TotalExitCount);
+      if (mb->VmresumeFailCount != 0)
+        HvBootReceiptNum (vol, "VMRESUME fails", mb->VmresumeFailCount);
+      if (mb->HostFaultCount != 0)
+        HvBootReceiptNum (vol, "HOST faults", mb->HostFaultCount);
       if ((HvMailboxFlags (mb) & HV_MAILBOX_FLAG_EBS_OK) != 0) {
         HvBootReceiptLine (vol, "CORE EBS");
       }

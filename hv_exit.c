@@ -13,11 +13,6 @@
 #include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
 #include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
 
-// Port-0x80 exit telemetry (Pass 101). Forward-declared here instead of
-// including hv_efi.h, which pulls in EDK2 headers; this file is kept free
-// of OS-specific headers per the top comment.
-void __outbyte(unsigned short Port, unsigned char Data);
-
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
 static void AdvanceGuestRip(void) {
@@ -49,37 +44,11 @@ static void AdvanceGuestRip(void) {
 // matches no recorded VCPU, and that case has no struct to write. It is counted
 // globally instead, because silently devirtualizing an unidentified CPU is
 // exactly the failure this whole change is about.
-//
-// Post-EBS behaviour (Open Issue 2 in STATUS.md): the asm shutdown path routes
-// through HvAsmSwitchToGuest, which fetches instructions after the mov cr3
-// switch to guest tables - a VA the guest's page tables don't map, so the next
-// fetch #PFs with no handler and triple-faults the machine. Pre-EBS the guest
-// IS the firmware whose identity map covers the stub, so that path is safe;
-// post-EBS it is not, and devirtualizing turns a controllable brick ("one
-// unknown exit on one CPU") into an uncontrollable one ("whole system reset").
-//
-// The post-EBS rule is therefore: do NOT run the asm devirt stub. Record the
-// cause, inject #UD(0) into the guest so the architectural event surfaces
-// (Windows bugchecks with a stack trace, VM shows a dump), and return TRUE so
-// the exit handler resumes guest execution normally. That trades a hard reset
-// for a diagnosable bugcheck - every observable outcome is strictly better.
 static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
 {
-  // Post-EBS short-circuit (Open Issue 2 in STATUS.md). Decide this first so
-  // the vcpu->Launched/VmxEnabled flags stay consistent with reality - the
-  // CPU is still in VMX non-root when we take this branch, and clearing those
-  // flags would mislead any later diagnostic that reads them.
-  BOOLEAN postEbs = (g_Mailbox != NULL) && HvMailboxValid(g_Mailbox) &&
-                    ((HvMailboxFlags(g_Mailbox) & HV_MAILBOX_FLAG_EBS_OK) != 0);
-
   if (vcpu != NULL) {
-    if (!postEbs) {
-      // Real devirt: the asm stub is about to VMXOFF. Record that fact.
-      vcpu->Launched = FALSE;
-      vcpu->VmxEnabled = FALSE;
-    }
-    // DevirtCause is recorded on both paths - the diagnostic value of "the
-    // HV wanted to devirt this CPU for reason X" doesn't change with EBS.
+    vcpu->Launched = FALSE;
+    vcpu->VmxEnabled = FALSE;
     vcpu->DevirtCause = cause;
   } else {
     g_Hv.DevirtNoVcpuCount++;
@@ -129,34 +98,6 @@ static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
       __cpuid(apicRegs, 1);
       g_Mailbox->DevirtApicId   = (UINT32)((apicRegs[1] >> 24) & 0xFF);
     }
-  }
-
-  // Post-EBS: inject #UD rather than running the asm devirt stub. See the
-  // header comment on this function for why the stub triple-faults post-EBS,
-  // and why #UD is strictly better than the alternative.
-  if (postEbs) {
-    UINT64 alreadyInjected = 0;
-    __vmx_vmread(VMCS_ENTRY_INTERRUPTION_INFO, &alreadyInjected);
-    if (!(alreadyInjected & (1ULL << 31))) {
-      // #UD: vector 6, type 3 (hardware exception), no error code, valid=1.
-      // The SDM makes VMCS_EXIT_INSTR_LENGTH valid for every exit reason that
-      // reaches this helper (CPUID, VMCALL, CR access, MSR access, invalid
-      // guest state, MCE, MSR loading); the triple-fault case has no valid
-      // length but injection on top of a triple fault is moot. Copying the
-      // live field is correct where it is live and inert where it is not.
-      __vmx_vmwrite(VMCS_ENTRY_EXCEPTION_ERROR, 0);
-      __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO,
-                    6ULL | (3ULL << 8) | (1ULL << 31));
-      UINT64 len = 0;
-      __vmx_vmread(VMCS_EXIT_INSTR_LENGTH, &len);
-      __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, len);
-    }
-    // If an injection was ALREADY written (HandleNmi, HandleExternalInterrupt,
-    // or an EPT handler all can do that), leave it in place: the pre-existing
-    // injection is what the exit's own semantics asked for, and clobbering it
-    // with #UD would mask a real event. The TRUE return still skips the
-    // asm shutdown path, which is the only part that would brick the machine.
-    return TRUE;
   }
 
   return FALSE;
@@ -286,45 +227,11 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   HvCpuidLookup(vcpu, leaf, subleaf, out);
 
   if (leaf == 1) {
-    // ECX.31 (hypervisor present): must be 0 to look like bare metal.
-    out[2] &= ~(1u << 31);
-    // EDX.31 (reserved on some older CPUs that signal "hypervisor present"
-    // in EDX instead of ECX).
-    out[3] &= ~(1u << 31);
-    // ECX.5 (VMX): also masked to 0.
-    //
-    // Pass 100 fix for Open Issue 1 (Dell Class B hang).
-    //
-    // The receipt from the Dell boot shows FULL DONE + CHAIN WIN slot start
-    // then silent hang - no BSOD, no further receipt. The hypervisor is
-    // alive and virtualization completed; Windows just stops under VMX
-    // non-root. Modern Windows (10/11) with Hyper-V or VBS auto-enabled
-    // reads CPUID.1:ECX.VMX and, if set, tries to initialise its own
-    // virtualization stack. VMXON then fails because our RDMSR of
-    // IA32_FEATURE_CONTROL returns LOCKED without VMXON_OUTSIDE_SMX. The
-    // "VMX advertised, VMX blocked" state is architecturally inconsistent,
-    // and the failure handling in hvix64 / securekernel is one of the few
-    // paths that CAN hang silently (versus the "no VMX at all" path, which
-    // boots cleanly). The project's previous comment called masking VMX
-    // "self-contradictory", but a bare-metal CPU with VMX locked disabled
-    // in firmware IS indistinguishable from a bare-metal CPU without VMX
-    // from the OS perspective. Masking VMX from CPUID presents the latter,
-    // coherent story and avoids waking Hyper-V / VBS at all. The symbolic
-    // "self-contradiction" is less important than Windows actually booting.
-    out[2] &= ~(1u << 5);
-  }
-
-  // Zero the "hypervisor vendor" range (0x40000000 .. 0x400000FF) so Windows
-  // and other guests don't see any fingerprint there. On bare metal with no
-  // outer hypervisor, this range returns the max-standard-leaf's data (an
-  // out-of-range leaf behaviour); on a system that DOES have an outer
-  // hypervisor (nested KVM, Hyper-V debug, etc.) the native CPUID returns
-  // that outer hypervisor's vendor string, which we must not leak. Returning
-  // all zeros is what a bare-metal CPU without any hypervisor extensions
-  // returns for an out-of-range leaf when the max standard leaf itself is
-  // all zeros - a plausible bare-metal response.
-  if ((leaf & 0xFFFFFF00u) == 0x40000000u) {
-    out[0] = out[1] = out[2] = out[3] = 0;
+    // ECX.5 (VMX) is deliberately LEFT SET. Clearing it on a VMX-capable CPU
+    // is self-contradictory and is paired with FEATURE_CONTROL returning
+    // "firmware-disabled" — the coherent story hardware already tells.
+    out[2] &= ~(1u << 31);   // hypervisor present
+    out[3] &= ~(1u << 31);   // EDX.31 (some older CPUs)
   }
 
   regs->Rax = out[0];
@@ -346,16 +253,6 @@ static void HandleNmi(void) {
   UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
   UINT32 type = (UINT32)((exitIntInfo >> 8) & 7);
 
-  // If an IDT-vectoring event was in flight when this exit occurred (SDM
-  // Vol 3C §27.2.4), the generic re-inject block at the end of HvExitHandler
-  // will put it back; writing an NMI injection here would clobber that. The
-  // original event is architecturally higher priority than our re-injected
-  // NMI, so defer. Dropping an NMI once is finite; corrupting an in-flight
-  // exception is not.
-  UINT64 idtInfo = 0;
-  __vmx_vmread(VMCS_IDT_VECTORING_INFO, &idtInfo);
-  if (idtInfo & (1ULL << 31)) return;
-
   if (vector == 2 && type == 2) {
     UINT64 injectInfo = 2 | (2ULL << 8) | (1ULL << 31);
     __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
@@ -364,46 +261,50 @@ static void HandleNmi(void) {
 
 // ── External interrupt handler ──────────────────────────────────────────────
 //
-// Reached only when PIN_BASED_EXT_INT_EXIT is set, which the Raptor Lake FIXED0
-// bits force on whether or not we requested it. With EXIT_CTRL_ACK_INT_ON_EXIT
-// enabled (hv_vmcs.c), the CPU acknowledges the interrupt on exit and leaves
-// the vector in VMCS_EXIT_INTERRUPTION_INFO. The host IDT only halts, so we
-// re-inject the vector via VMCS_ENTRY_INTERRUPTION_INFO; the guest's own IVT /
-// IDT then handles it on VM-entry. Without this re-injection the interrupt is
-// silently dropped — the firmware timer tick, PS/2, USB, SATA, every IPI the
-// OS loader relies on. Do NOT advance RIP: the guest didn't execute anything,
-// an interrupt is an asynchronous event, so RIP must stay at the next
-// instruction to execute.
+// ACK_INT_ON_EXIT is set: on VM-exit for an external interrupt the LAPIC has
+// already acknowledged it (ISR bit set, vector in exit-interruption-info).
+// We must re-inject it so the guest's IDT handler runs and sends EOI.
 //
-// If ACK_INT_ON_EXIT was stripped by AdjustControls (CPU disallows it, which
-// no shipping Intel CPU does), the valid-bit test below is FALSE and we
-// resume without injection — the interrupt stays pending at the LAPIC and
-// the guest will see it when it next clears IF, matching bare-metal behaviour
-// as closely as possible given the capability.
+// If the guest cannot accept the interrupt right now (IF=0, blocking-by-STI,
+// blocking-by-MOV-SS, or an IDT-vectoring event in flight), we save the
+// vector and arm interrupt-window exiting so EXIT_REASON_PENDING_INTERRUPT
+// fires when the guest becomes interruptible.
 
-static void HandleExternalInterrupt(void) {
+static void HandleExternalInterrupt(PVCPU vcpu) {
   UINT64 exitIntInfo = 0;
   __vmx_vmread(VMCS_EXIT_INTERRUPTION_INFO, &exitIntInfo);
 
-  // Bit 31 is the valid bit. ACK sets it; the control stripped away by
-  // AdjustControls leaves it clear.
   if (!(exitIntInfo & (1ULL << 31))) return;
 
-  // Defer to any IDT-vectoring event in flight (SDM §27.2.4). The generic
-  // re-inject block at the end of HvExitHandler will replay it; writing an
-  // injection here would clobber that in-flight exception. The architectural
-  // priority is: finish the original delivery, then take the new interrupt.
-  // The LAPIC has already ACKed, so this one external interrupt is lost -
-  // finite loss, no corruption of in-flight state.
+  UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
+
   UINT64 idtInfo = 0;
   __vmx_vmread(VMCS_IDT_VECTORING_INFO, &idtInfo);
-  if (idtInfo & (1ULL << 31)) return;
+  if (idtInfo & (1ULL << 31)) goto defer;
 
-  UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
-  // Build the entry-injection word: vector, type 0 (external interrupt),
-  // error-code valid 0 (external interrupts never have one), valid bit 1.
-  UINT64 injectInfo = (UINT64)vector | (0ULL << 8) | (1ULL << 31);
-  __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
+  UINT64 rflags = 0;
+  __vmx_vmread(VMCS_GUEST_RFLAGS, &rflags);
+  if (!(rflags & (1ULL << 9))) goto defer;
+
+  UINT64 interruptibility = 0;
+  __vmx_vmread(VMCS_GUEST_INTERRUPTIBILITY, &interruptibility);
+  if (interruptibility & 0x3) goto defer;
+
+  {
+    UINT64 injectInfo = (UINT64)vector | (0ULL << 8) | (1ULL << 31);
+    __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
+  }
+  return;
+
+defer:
+  if (vcpu->PendingExtIntCount < HV_PENDING_INT_SLOTS)
+    vcpu->PendingExtInts[vcpu->PendingExtIntCount++] = (UINT8)vector;
+  {
+    SIZE_T procCtl = 0;
+    __vmx_vmread(VMCS_PROC_BASED_CONTROLS, &procCtl);
+    procCtl |= (SIZE_T)PROC_BASED_INT_WINDOW_EXIT;
+    __vmx_vmwrite(VMCS_PROC_BASED_CONTROLS, procCtl);
+  }
 }
 
 // ── VMCALL handler ──────────────────────────────────────────────────────────
@@ -878,31 +779,7 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
       g_Mailbox->VmresumeFailInstrErr = (UINT32)instrErr;
     }
   }
-#if DBG
-  // ExitCounts[64] lives inside HV_GLOBAL only in checked builds (hvdefs.h),
-  // and the HV_HYPERCALL_QUERY_EXIT_COUNTS reader (hv_efi_hypercall.c) is
-  // under the same guard. Without this guard the RELEASE build fails to
-  // compile with "struct HV_GLOBAL has no field named 'ExitCounts'".
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
-#endif
-
-  // Port-0x80 exit telemetry (Pass 101).
-  //
-  // A POST card attached to port 0x80 displays the LAST byte written there.
-  // Writing the exit reason on every VM exit means the final state of the
-  // display reflects what Windows (or anything running as guest) was last
-  // trying to do when it stopped running - which is the single most useful
-  // piece of information for diagnosing a silent hang that produces no
-  // BSOD and no receipt line past CHAIN WIN slot start.
-  //
-  // Cost: ~1 OUT instruction per exit. On modern CPUs an OUT to a non-
-  // listener port costs ~500ns; typical Windows boot generates ~10K VM exits
-  // per second, so this is ~0.5% slower boot. Harmless on systems without a
-  // POST card listener. We OR 0x40 into the reason so the 0..75 exit-reason
-  // range maps to 0x40..0x8B - above the HV_POST stage codes (0xB0..0xC5)
-  // and failure codes (0xE2..0xEC) so a glance at the POST card can tell a
-  // boot-stage code from a running-guest exit code.
-  __outbyte(0x80, (unsigned char)(0x40 | (reason & 0x3F)));
 
   UINT64 rip = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
@@ -947,7 +824,7 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     break;
 
   case EXIT_REASON_EXT_INTERRUPT:
-    HandleExternalInterrupt();
+    HandleExternalInterrupt(vcpu);
     break;
 
   case EXIT_REASON_XSETBV:
@@ -1053,12 +930,31 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   // is always safe: it makes the guest skip the instruction. The functional
   // loss (a dropped DR write, an unemulated IN) is acceptable as a survival
   // strategy for a control bit we never asked for.
-  //
-  // The first group (PENDING_INTERRUPT and friends) are async / state-signalling
-  // exits with no instruction to skip - they just `break` and let VM-entry
-  // deliver whatever's pending. The second group (TASK_SWITCH .. RDTSCP) are
-  // instruction-caused exits that need RIP advanced.
   case EXIT_REASON_PENDING_INTERRUPT:
+    if (vcpu->PendingExtIntCount > 0) {
+      // Inject the HIGHEST vector first. The LAPIC's EOI always clears the
+      // highest ISR bit; injecting in descending priority order ensures each
+      // guest EOI clears the ISR bit for the interrupt it just handled.
+      UINT32 maxIdx = 0;
+      for (UINT32 i = 1; i < vcpu->PendingExtIntCount; i++) {
+        if (vcpu->PendingExtInts[i] > vcpu->PendingExtInts[maxIdx])
+          maxIdx = i;
+      }
+      UINT8 vec = vcpu->PendingExtInts[maxIdx];
+      vcpu->PendingExtIntCount--;
+      for (UINT32 i = maxIdx; i < vcpu->PendingExtIntCount; i++)
+        vcpu->PendingExtInts[i] = vcpu->PendingExtInts[i + 1];
+      UINT64 injectInfo = (UINT64)vec | (0ULL << 8) | (1ULL << 31);
+      __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
+    }
+    if (vcpu->PendingExtIntCount == 0) {
+      SIZE_T procCtl = 0;
+      __vmx_vmread(VMCS_PROC_BASED_CONTROLS, &procCtl);
+      procCtl &= ~(SIZE_T)PROC_BASED_INT_WINDOW_EXIT;
+      __vmx_vmwrite(VMCS_PROC_BASED_CONTROLS, procCtl);
+    }
+    break;
+
   case EXIT_REASON_APIC_WRITE:
   case EXIT_REASON_VIRTUALIZED_EOI:
   case EXIT_REASON_TPR_BELOW:
@@ -1067,28 +963,6 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   case EXIT_REASON_BUS_LOCK:
   case EXIT_REASON_NOTIFICATION:
   case EXIT_REASON_INSTRUCTION_TIMEOUT:
-    break;
-
-  // Instruction-caused exits whose VMCS controls we never set but which some
-  // CPUs may still force via FIXED0 (or that fire from obscure guest state
-  // this driver has not been seen to encounter). Each is an instruction the
-  // guest just tried to execute, so we advance guest RIP past it; the semantic
-  // loss (an uncaptured RDTSC read, a dropped MOV DR, an unemulated IN/OUT) is
-  // a far better outcome than devirtualizing a running system. Pass 99
-  // reinstates these cases - Pass 97 was documented as adding them but the
-  // code shipped without any of them in the dispatcher.
-  case EXIT_REASON_TASK_SWITCH:
-  case EXIT_REASON_DR_ACCESS:
-  case EXIT_REASON_IO:
-  case EXIT_REASON_RDPMC:
-  case EXIT_REASON_RDTSC:
-  case EXIT_REASON_RSM:
-  case EXIT_REASON_MWAIT:
-  case EXIT_REASON_MONITOR:
-  case EXIT_REASON_GDTR_IDTR:
-  case EXIT_REASON_LDTR_TR:
-  case EXIT_REASON_RDTSCP:
-    AdvanceGuestRip();
     break;
 
   case EXIT_REASON_INIT:
@@ -1141,22 +1015,10 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     __vmx_vmwrite(VMCS_GUEST_LDTR_LIMIT,  0xFFFF);
     __vmx_vmwrite(VMCS_GUEST_LDTR_ACCESS, 0x10000); // unusable
 
-    // TR: unrestricted-guest allows a "virtual" TR that is not backed by
-    // a real GDT descriptor as long as its VMCS access-rights field says
-    // type 11 (busy TSS) and the base is canonical. We previously set
-    // TR_SEL and TR_LIMIT and TR_ACCESS but LEFT TR_BASE at the initial
-    // VMCS setup value (&vcpu->Tss, a firmware address). After SIPI,
-    // VMCS_GUEST_GDTR_BASE is reset to 0 (real-mode default), so the
-    // selector `tssSel` has no descriptor backing - and some Intel CPUs
-    // (hybrid Raptor Lake E-cores in particular) validate the TR descriptor
-    // against the GDT on VM entry and return VM-instruction error 8
-    // ("invalid control field") on the mismatch. The user's intermittent
-    // detail=0x108 (CLASS_VMENTRY, vmErr=8) traces to exactly this.
-    //
-    // Fix (Pass 102): write TR_BASE explicitly to `&vcpu->Tss`, matching
-    // the VMCS-cached segment semantics the SDM gives for unrestricted
-    // guest. The base is already set at VMCS init, but on INIT it is NOT
-    // reset by the exit handler; so we re-publish it here to be sure.
+    // TR: 16-bit busy TSS (type 3) or 32-bit busy TSS (type 11 / 0x8B).
+    // Intel SDM Vol 3C §26.3.1.2: The selector field for TR must NOT be 0000H.
+    // Use the valid host TSS slot pre-allocated for this CPU at bring-up.
+    // Keep the TSS base from the original VMCS setup (points at &vcpu->Tss).
     UINT16 tssSel = 0;
     if (g_HvHostBaseTssSlot != 0 && vcpu != NULL) {
       tssSel = g_HvHostBaseTssSlot + (UINT16)(vcpu->ProcessorIndex * 16u);
@@ -1164,27 +1026,13 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
       tssSel = 0x40; // Architectural non-zero TSS selector fallback
     }
     __vmx_vmwrite(VMCS_GUEST_TR_SEL,      (UINT64)tssSel);
-    __vmx_vmwrite(VMCS_GUEST_TR_BASE,     vcpu ? (UINT64)&vcpu->Tss : 0);
     __vmx_vmwrite(VMCS_GUEST_TR_LIMIT,    (UINT64)(sizeof(HV_TSS64) - 1));
-    __vmx_vmwrite(VMCS_GUEST_TR_ACCESS,   0x8B); // present, busy TSS
+    __vmx_vmwrite(VMCS_GUEST_TR_ACCESS,   0x8B); // present, busy 32-bit TSS
 
     // GDTR/IDTR: real-mode defaults (base 0, limit 0xFFFF). The AP
-    // trampoline code will LGDT before enabling protected mode. We ALSO
-    // point GDTR at our own g_HvHostGdt (which has the TSS descriptor at
-    // tssSel) when g_HvHostGdt is initialised; the AP's real-mode code
-    // never dereferences GDT, and when it enters protected mode via LGDT
-    // it overwrites GDTR anyway. Giving VMX validation a GDT that DOES
-    // contain the TR descriptor keeps every strict CPU happy at VM entry
-    // without breaking real-mode operation.
-    extern UINT8 g_HvHostGdt[];
-    extern UINT32 g_HvHostGdtLimit;
-    if (g_HvHostGdtLimit) {
-      __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,  (UINT64)g_HvHostGdt);
-      __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT, g_HvHostGdtLimit);
-    } else {
-      __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,  0);
-      __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT, 0xFFFF);
-    }
+    // trampoline code will LGDT before enabling protected mode.
+    __vmx_vmwrite(VMCS_GUEST_GDTR_BASE,   0);
+    __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT,  0xFFFF);
     __vmx_vmwrite(VMCS_GUEST_IDTR_BASE,   0);
     __vmx_vmwrite(VMCS_GUEST_IDTR_LIMIT,  0x3FF); // real-mode IVT: 256×4 = 1024
 

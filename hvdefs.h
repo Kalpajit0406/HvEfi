@@ -77,9 +77,7 @@ typedef struct _PHYSICAL_MEMORY_RANGE {
 #define MAXULONG64          0xFFFFFFFFFFFFFFFFULL
 
 #define UNREFERENCED_PARAMETER(x) (void)(x)
-#ifndef DECLSPEC_ALIGN
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
-#endif
 
 // Volatile interlocked ops — MSVC builtins
 //
@@ -203,14 +201,6 @@ void HvAsmLoadTr(UINT16 selector);
 void HvAsmLoadLdtr(UINT16 selector);
 void HvAsmWriteDr7(UINT64 value);   /* 64-bit: __writedr truncates to 32 */
 
-// MSVC-only intrinsic redeclarations: the EDK2 Windows build needs these
-// because MDE_CPU_X64 omits <intrin.h>, but a Linux cross-build driven by
-// clang-targeting-windows-gnu provides them via mingw's <intrin.h>, and
-// redeclaring them with slightly different signatures causes "cannot combine
-// specifier" / "function cannot return function type" errors. The cross-build
-// defines HV_CROSS_SKIP_INTRIN_REDECLS via its -include shim so this block
-// is skipped there and mingw's declarations win.
-#ifndef HV_CROSS_SKIP_INTRIN_REDECLS
 #pragma intrinsic(__readcr0)
 #pragma intrinsic(__readcr3)
 #pragma intrinsic(__readcr4)
@@ -271,7 +261,6 @@ void __cpuidex(int *, int, int);
 #pragma intrinsic(__stosb)
 void __movsb(unsigned char *, const unsigned char *, unsigned __int64);
 void __stosb(unsigned char *, unsigned char, unsigned __int64);
-#endif /* !HV_CROSS_SKIP_INTRIN_REDECLS */
 #define RtlCopyMemory(dst, src, sz)   __movsb((unsigned char*)(dst), (const unsigned char*)(src), (sz))
 #define RtlZeroMemory(dst, sz)        __stosb((unsigned char*)(dst), 0, (sz))
 #define RtlSecureZeroMemory(dst, sz)  __stosb((unsigned char*)(dst), 0, (sz))
@@ -291,13 +280,7 @@ typedef struct _PHYSICAL_MEMORY_RANGE {
 } PHYSICAL_MEMORY_RANGE;
 
 #define PAGE_SIZE           0x1000
-// DECLSPEC_ALIGN: __declspec(align(x)) is the MSVC spelling. Clang on
-// windows-gnu reports it as "unknown attribute 'align' ignored" under
-// -Werror. The cross-build shim defines a compatible version first; honour
-// it rather than overwriting.
-#ifndef DECLSPEC_ALIGN
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
-#endif
 #define KdPrint(x)          ((void)0)
 #define UNREFERENCED_PARAMETER(x) (void)(x)
 #define NT_SUCCESS(s)       ((NTSTATUS)(s) >= 0)
@@ -825,21 +808,6 @@ static __inline BOOLEAN HvXcr0ValueValid(UINT64 value, UINT64 supported) {
 #define HV_HYPERCALL_GET_TOKEN          0x0012  // p1=pid; returns EPROCESS.Token value
 #define HV_HYPERCALL_EPT_HOOK           0x0013  // p1=targetGVA, p2=hookBytesVA, p3=hookLen
 #define HV_HYPERCALL_EPT_UNHOOK         0x0014  // p1=targetGVA
-// Cooperative post-EBS devirtualization (Pass 99, Open Issue 2 "true path").
-// A kernel driver tells us a GUEST VA that maps the SAME physical page as the
-// HvAsmSwitchToGuest asm stub. HvEfi records it, and the next time a
-// devirt-triggering exit lands post-EBS it jumps to that VA before switching
-// CR3 — so the instruction fetch after `mov cr3` lands on a VA that is valid
-// under the guest's own page tables. The fail-safe (inject #UD) stays as the
-// fallback when no such VA has been registered. Without this hypercall, there
-// is no way for the EFI driver alone to know what VA Windows (or any OS) will
-// map our stub at — that information lives only in the OS's own page tables.
-//
-// p1 = guest kernel VA that maps the physical page of HvAsmSwitchToGuest.
-// p2 = guest kernel VA that maps the physical page containing our HOST_CR3's
-//      PML4 (needed so the stub can read it after switching to guest CR3 —
-//      optional on OS kernels that already maintain a kernel-wide physmap).
-#define HV_HYPERCALL_REGISTER_DEVIRT_VA 0x0015
 
 typedef struct {
     UINT64 Va;      // guest virtual address of destination buffer
@@ -1028,6 +996,18 @@ typedef struct _VCPU {
     // ../hv_hookpool.h.
     UINT64        MtfHookTag;
     BOOLEAN       MtfRestorePending;
+
+    // ACK'd external interrupts that couldn't be injected immediately (guest
+    // IF=0, blocking-by-STI/MOV-SS, or IDT-vectoring event in flight).
+    // Interrupt-window exiting is armed; EXIT_REASON_PENDING_INTERRUPT injects
+    // one vector per firing until the queue drains.
+    //
+    // A single slot lost vectors when two interrupts arrived in the same IF=0
+    // window: the second overwrote the first, its ISR bit stayed set (no EOI),
+    // and the LAPIC progressively blocked priority levels until a hang.
+#define HV_PENDING_INT_SLOTS 16
+    UINT8         PendingExtInts[HV_PENDING_INT_SLOTS];
+    UINT8         PendingExtIntCount;
 } VCPU, *PVCPU;
 
 // ── Devirtualization snapshot (EFI build) ───────────────────────────────────
@@ -1372,10 +1352,6 @@ typedef struct _HV_GLOBAL {
     // EFI-specific: CR3 offset for guest EPROCESS (configurable via hypercall)
     UINT32      DirectoryTableOffset;
 
-    // (Open Issue 2 cooperative devirt lives in the standalone global
-    //  g_HvDevirtKernelStubVa, not here — the asm shutdown stub reads it
-    //  with external linkage, just like g_HvStateSaveMode/Mask.)
-
     // Per-Core VMLAUNCH target count (Pass 96)
     UINT32      TargetVcpuCount;
 
@@ -1408,6 +1384,12 @@ typedef struct _HV_GLOBAL {
     // the pending-MTF tag, so a recycled slot is rejected rather than restored.
     volatile LONG EptHookEpoch;
 
+    // Actual VMCS controls after AdjustControls (BSP values, same for all CPUs)
+    UINT32      ActualPinCtls;
+    UINT32      ActualProcCtls;
+    UINT32      ActualExitCtls;
+    UINT32      ActualProcCtls2;
+
 #if DBG
     // Per-exit-reason counters for performance + stealth auditing.
     volatile LONG64 ExitCounts[64];
@@ -1418,6 +1400,7 @@ extern HV_GLOBAL g_Hv;
 #include "hv_efi_bootcfg.h"
 extern volatile HV_MAILBOX *g_Mailbox;
 extern UINT16 g_HvHostBaseTssSlot;
+extern volatile UINT32 g_HvHostFaultSeen;
 
 // ── Function declarations ───────────────────────────────────────────────────
 
@@ -1500,8 +1483,6 @@ void     HvSmpBroadcastEptFlush(void);
 
 // hv_asm.asm
 extern void HvAsmVmxEntry(void);
-extern void HvAsmSwitchToGuest(UINT64 cr3, UINT64 rsp, UINT16 csSel,
-                               UINT64 rip, UINT64 rflags);
 extern int  HvAsmVmxLaunch(void);
 extern void HvAsmVmxResume(void);
 extern void HvAsmWriteCr2(UINT64 value);

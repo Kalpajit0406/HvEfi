@@ -100,6 +100,6 @@
   MSFT:DEBUG_*_*_CC_FLAGS = /D DBG
   # Runtime driver under MSFT toolchain: raise section alignment so the LTCG
   # .CIL section (4096-aligned) is accepted by the linker.
-  MSFT:*_*_X64_DLINK_FLAGS = /ALIGN:4096 /FILEALIGN:4096
+  MSFT:*_*_X64_DLINK_FLAGS = /ALIGN:4096 /FILEALIGN:4096 /PDBALTPATH:HvEfi.pdb
   # NASM/MASM for the assembly file
   MSFT:*_*_X64_ASM_FLAGS = /nologo /c /Cx

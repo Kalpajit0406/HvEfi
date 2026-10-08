@@ -21,20 +21,6 @@
 typedef unsigned __int64 UINT64;
 #endif
 
-// Cross-compiler force-inline hint. MSVC spells it __forceinline; GCC/Clang
-// prefer `inline __attribute__((always_inline))`. On MSVC+WDK the EDK2 build
-// defines __forceinline natively; on clang-targeting-windows-gnu (our cross
-// build), mingw's _mingw.h expands __forceinline to `extern __inline__ ...`
-// which collides with a leading `static`. Routing through this macro keeps
-// both toolchains happy without touching the hv_siphash.h call sites.
-#if defined(_MSC_VER) && !defined(__clang__)
-#  define HV_FORCEINLINE static __forceinline
-#elif defined(__GNUC__) || defined(__clang__)
-#  define HV_FORCEINLINE static inline __attribute__((always_inline))
-#else
-#  define HV_FORCEINLINE static inline
-#endif
-
 #define HV_ROTL64(x, b)  (((x) << (b)) | ((x) >> (64 - (b))))
 
 #define HV_SIPROUND(v0, v1, v2, v3) do {   \
@@ -57,7 +43,7 @@ typedef unsigned __int64 UINT64;
 // SipHash-2-4 over an arbitrary byte string. k0/k1 are the 128-bit key.
 // Little-endian block loads (x64 is LE), byte-by-byte so it is also correct
 // if this is ever compiled for a big-endian target.
-HV_FORCEINLINE UINT64 HvSipHash(UINT64 k0, UINT64 k1,
+static __forceinline UINT64 HvSipHash(UINT64 k0, UINT64 k1,
                                       const void *msg, size_t len) {
     const unsigned char *m = (const unsigned char *)msg;
 
@@ -99,7 +85,7 @@ HV_FORCEINLINE UINT64 HvSipHash(UINT64 k0, UINT64 k1,
 }
 
 // Single 8-byte message (kept for existing call sites).
-HV_FORCEINLINE UINT64 HvSipHash64(UINT64 k0, UINT64 k1, UINT64 msg) {
+static __forceinline UINT64 HvSipHash64(UINT64 k0, UINT64 k1, UINT64 msg) {
     return HvSipHash(k0, k1, &msg, sizeof(msg));
 }
 
@@ -110,7 +96,7 @@ HV_FORCEINLINE UINT64 HvSipHash64(UINT64 k0, UINT64 k1, UINT64 msg) {
 // every boot. The key is therefore only recoverable by someone who holds the
 // ticket.
 
-HV_FORCEINLINE void HvDeriveSession(const UINT64 ticket[4], UINT64 nonce,
+static __forceinline void HvDeriveSession(const UINT64 ticket[4], UINT64 nonce,
                                           UINT64 *key0, UINT64 *key1) {
     *key0 = HvSipHash(ticket[0], ticket[1], &nonce, sizeof(nonce));
     UINT64 inv = ~nonce;
@@ -119,7 +105,7 @@ HV_FORCEINLINE void HvDeriveSession(const UINT64 ticket[4], UINT64 nonce,
 
 // Per-boot R10 value registered as the "our hypercall" magic. Not a constant
 // any more, so a disassembly of the client does not reveal a static signature.
-HV_FORCEINLINE UINT64 HvSessionMagic(UINT64 key0, UINT64 key1) {
+static __forceinline UINT64 HvSessionMagic(UINT64 key0, UINT64 key1) {
     UINT64 tag = 0x4D4147494321ULL;   // 'MAGIC!'
     return HvSipHash(key0, key1, &tag, sizeof(tag));
 }
@@ -129,7 +115,7 @@ HV_FORCEINLINE UINT64 HvSessionMagic(UINT64 key0, UINT64 key1) {
 // replaces the old static 'HVMM' constant, so neither binary contains a
 // fixed hypervisor signature. Domain-separated from the session MACs via a
 // distinct tag.
-HV_FORCEINLINE UINT64 HvBootMagic(const UINT64 ticket[4]) {
+static __forceinline UINT64 HvBootMagic(const UINT64 ticket[4]) {
     UINT64 tag = 0x2147414D54544F42ULL;   // 'BOTTMA\x47!' domain separator
     UINT64 words[5];
     words[0] = ticket[0];
@@ -144,13 +130,13 @@ HV_FORCEINLINE UINT64 HvBootMagic(const UINT64 ticket[4]) {
 // MAC over a 6-word tuple: magic, id, p1, p2, p3Real, seq.
 // Commits to every word independently (unlike the old XOR fold, which made
 // joint-XOR parameter substitution possible without the key).
-HV_FORCEINLINE UINT64 HvMacTuple(UINT64 key0, UINT64 key1,
+static __forceinline UINT64 HvMacTuple(UINT64 key0, UINT64 key1,
                                        const UINT64 words[6]) {
     return HvSipHash(key0, key1, words, 6 * sizeof(UINT64));
 }
 
 // MAC for the devirtualization hypercall.
-HV_FORCEINLINE UINT64 HvMacUnload(UINT64 key0, UINT64 key1) {
+static __forceinline UINT64 HvMacUnload(UINT64 key0, UINT64 key1) {
     UINT64 tag = 0x554E4C4F4144ULL;   // 'UNLOAD'
     return HvSipHash(key0, key1, &tag, sizeof(tag));
 }
