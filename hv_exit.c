@@ -44,11 +44,37 @@ static void AdvanceGuestRip(void) {
 // matches no recorded VCPU, and that case has no struct to write. It is counted
 // globally instead, because silently devirtualizing an unidentified CPU is
 // exactly the failure this whole change is about.
+//
+// Post-EBS behaviour (Open Issue 2 in STATUS.md): the asm shutdown path routes
+// through HvAsmSwitchToGuest, which fetches instructions after the mov cr3
+// switch to guest tables - a VA the guest's page tables don't map, so the next
+// fetch #PFs with no handler and triple-faults the machine. Pre-EBS the guest
+// IS the firmware whose identity map covers the stub, so that path is safe;
+// post-EBS it is not, and devirtualizing turns a controllable brick ("one
+// unknown exit on one CPU") into an uncontrollable one ("whole system reset").
+//
+// The post-EBS rule is therefore: do NOT run the asm devirt stub. Record the
+// cause, inject #UD(0) into the guest so the architectural event surfaces
+// (Windows bugchecks with a stack trace, VM shows a dump), and return TRUE so
+// the exit handler resumes guest execution normally. That trades a hard reset
+// for a diagnosable bugcheck - every observable outcome is strictly better.
 static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
 {
+  // Post-EBS short-circuit (Open Issue 2 in STATUS.md). Decide this first so
+  // the vcpu->Launched/VmxEnabled flags stay consistent with reality - the
+  // CPU is still in VMX non-root when we take this branch, and clearing those
+  // flags would mislead any later diagnostic that reads them.
+  BOOLEAN postEbs = (g_Mailbox != NULL) && HvMailboxValid(g_Mailbox) &&
+                    ((HvMailboxFlags(g_Mailbox) & HV_MAILBOX_FLAG_EBS_OK) != 0);
+
   if (vcpu != NULL) {
-    vcpu->Launched = FALSE;
-    vcpu->VmxEnabled = FALSE;
+    if (!postEbs) {
+      // Real devirt: the asm stub is about to VMXOFF. Record that fact.
+      vcpu->Launched = FALSE;
+      vcpu->VmxEnabled = FALSE;
+    }
+    // DevirtCause is recorded on both paths - the diagnostic value of "the
+    // HV wanted to devirt this CPU for reason X" doesn't change with EBS.
     vcpu->DevirtCause = cause;
   } else {
     g_Hv.DevirtNoVcpuCount++;
@@ -98,6 +124,34 @@ static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
       __cpuid(apicRegs, 1);
       g_Mailbox->DevirtApicId   = (UINT32)((apicRegs[1] >> 24) & 0xFF);
     }
+  }
+
+  // Post-EBS: inject #UD rather than running the asm devirt stub. See the
+  // header comment on this function for why the stub triple-faults post-EBS,
+  // and why #UD is strictly better than the alternative.
+  if (postEbs) {
+    UINT64 alreadyInjected = 0;
+    __vmx_vmread(VMCS_ENTRY_INTERRUPTION_INFO, &alreadyInjected);
+    if (!(alreadyInjected & (1ULL << 31))) {
+      // #UD: vector 6, type 3 (hardware exception), no error code, valid=1.
+      // The SDM makes VMCS_EXIT_INSTR_LENGTH valid for every exit reason that
+      // reaches this helper (CPUID, VMCALL, CR access, MSR access, invalid
+      // guest state, MCE, MSR loading); the triple-fault case has no valid
+      // length but injection on top of a triple fault is moot. Copying the
+      // live field is correct where it is live and inert where it is not.
+      __vmx_vmwrite(VMCS_ENTRY_EXCEPTION_ERROR, 0);
+      __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO,
+                    6ULL | (3ULL << 8) | (1ULL << 31));
+      UINT64 len = 0;
+      __vmx_vmread(VMCS_EXIT_INSTR_LENGTH, &len);
+      __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, len);
+    }
+    // If an injection was ALREADY written (HandleNmi, HandleExternalInterrupt,
+    // or an EPT handler all can do that), leave it in place: the pre-existing
+    // injection is what the exit's own semantics asked for, and clobbering it
+    // with #UD would mask a real event. The TRUE return still skips the
+    // asm shutdown path, which is the only part that would brick the machine.
+    return TRUE;
   }
 
   return FALSE;
@@ -253,6 +307,16 @@ static void HandleNmi(void) {
   UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
   UINT32 type = (UINT32)((exitIntInfo >> 8) & 7);
 
+  // If an IDT-vectoring event was in flight when this exit occurred (SDM
+  // Vol 3C §27.2.4), the generic re-inject block at the end of HvExitHandler
+  // will put it back; writing an NMI injection here would clobber that. The
+  // original event is architecturally higher priority than our re-injected
+  // NMI, so defer. Dropping an NMI once is finite; corrupting an in-flight
+  // exception is not.
+  UINT64 idtInfo = 0;
+  __vmx_vmread(VMCS_IDT_VECTORING_INFO, &idtInfo);
+  if (idtInfo & (1ULL << 31)) return;
+
   if (vector == 2 && type == 2) {
     UINT64 injectInfo = 2 | (2ULL << 8) | (1ULL << 31);
     __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, injectInfo);
@@ -285,6 +349,16 @@ static void HandleExternalInterrupt(void) {
   // Bit 31 is the valid bit. ACK sets it; the control stripped away by
   // AdjustControls leaves it clear.
   if (!(exitIntInfo & (1ULL << 31))) return;
+
+  // Defer to any IDT-vectoring event in flight (SDM §27.2.4). The generic
+  // re-inject block at the end of HvExitHandler will replay it; writing an
+  // injection here would clobber that in-flight exception. The architectural
+  // priority is: finish the original delivery, then take the new interrupt.
+  // The LAPIC has already ACKed, so this one external interrupt is lost -
+  // finite loss, no corruption of in-flight state.
+  UINT64 idtInfo = 0;
+  __vmx_vmread(VMCS_IDT_VECTORING_INFO, &idtInfo);
+  if (idtInfo & (1ULL << 31)) return;
 
   UINT32 vector = (UINT32)(exitIntInfo & 0xFF);
   // Build the entry-injection word: vector, type 0 (external interrupt),

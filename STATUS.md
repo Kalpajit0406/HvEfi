@@ -175,21 +175,33 @@ The next step is the hardware ladder (B0, B1, B2), described below.
 
 ## Open Issue 2 — Post-ExitBootServices Devirtualization
 
-**Status**: Known limitation, not yet addressed.
+**Status**: Fail-safe added in Pass 99; a true devirt path is still future work.
 
 If the hypervisor needs to devirtualize after `ExitBootServices` (e.g., the
 OS requests VMXOFF via an unload hypercall), the `HvAsmSwitchToGuest` routine
 assumes identity-mapped firmware page tables. After EBS, the guest stack is a
-high canonical virtual address that is unmapped under the host CR3. Executing
-the switch sequence would triple-fault the CPU.
+high canonical virtual address that is unmapped under the host CR3, and the
+stub's own code VA is unmapped under the guest CR3 — the first instruction
+fetch after the `mov cr3` triple-faults the CPU.
 
-**Current mitigation**: The EFI hypervisor stays virtualized permanently. Once
-`VMLAUNCH` succeeds, there is no devirtualization path. The `HvAsmSwitchToGuest`
-routine exists in the assembly but has no C caller in the EFI tree.
+**Current state (Pass 99)**: Every VM-exit reason that cannot be modelled
+(e.g. an unknown exit, EPT misconfig, invalid guest state, MCE during entry,
+MSR loading, triple fault) used to funnel through `HvDevirtualizeThisCpu`
+with a `FALSE` return, which drove the asm shutdown stub down the brick
+path above. Pass 99 adds a post-EBS short-circuit: if the mailbox's
+`EBS_OK` flag is set, inject `#UD(0)` into the guest and return `TRUE` so
+the stub takes the VMRESUME path, never VMXOFF. The guest's own IDT then
+takes the `#UD`; a modern OS bugchecks with a stack trace naming the exit
+reason, which is strictly better than a silent hard reset.
 
-**Impact**: If a future feature requires runtime unload from the EFI path, a
-new devirtualization sequence is needed that operates with the guest's own
-page tables (via VMCS guest CR3) rather than the host's identity map.
+**Still future work**: an actual runtime unload path from the EFI tree. That
+needs a devirtualization sequence that operates with the guest's own page
+tables (via VMCS guest CR3) rather than the host's identity map — for
+example, by placing the switch stub in a page that is mapped at the SAME
+virtual address in both the host and the guest, which Windows does not
+guarantee without `SetVirtualAddressMap` cooperation. Not needed for boot
+or steady-state VMX; mentioned here because the `HvAsmSwitchToGuest` entry
+in `hv_asm.asm` still carries the pre-EBS precondition note.
 
 ---
 
@@ -236,6 +248,9 @@ pattern. A missing line narrows the failure to a specific code path.
 | 98 | TSS EPT unhiding | TSS pages explicitly unhidden in EPT to prevent triple-fault on task switch. |
 | 99 | ACK_INT_ON_EXIT (regression recovery) | Pass 97 was documented as adding `EXIT_CTRL_ACK_INT_ON_EXIT` and a proper re-inject in `HandleExternalInterrupt`, but the code shipped with neither — the mask in `hv_vmcs.c` omitted the bit, and the handler was a bare no-op. Pass 99 puts both back: the bit is added to the desired exit controls (and stripped automatically on CPUs that disallow it), and `HandleExternalInterrupt` now reads `VMCS_EXIT_INTERRUPTION_INFO`, pulls out the vector, and writes a valid `VMCS_ENTRY_INTERRUPTION_INFO` so the guest's own IDT handles it on VM-entry. Fixes the Raptor Lake FIXED0 case where every external interrupt would otherwise exit, stay pending, and re-exit forever. |
 | 99 | RELEASE build fix (`ExitCounts` referenced outside `#if DBG`) | `hv_exit.c` incremented `g_Hv.ExitCounts[reason]` on every exit, but the field only exists in checked (`DBG`) builds — the matching reader in `hv_efi_hypercall.c` is guarded, the writer wasn't. A RELEASE build therefore failed with "struct HV_GLOBAL has no field named 'ExitCounts'". Pass 99 wraps the write in the same `#if DBG`. |
+| 99 | IDT_VECTORING re-inject race | `HandleNmi` and the newly reinstated `HandleExternalInterrupt` both wrote `VMCS_ENTRY_INTERRUPTION_INFO` unconditionally, which could clobber an IDT-vectoring event in flight (SDM §27.2.4) — the exit handler's generic re-inject block then skipped it because the valid bit was already set, so an in-flight exception was silently dropped. Pass 99 makes both handlers check `VMCS_IDT_VECTORING_INFO` first and defer to the generic re-inject when its valid bit is set; the new interrupt or NMI is dropped once rather than corrupting an in-flight exception. |
+| 99 | Per-AP timeout tightened (budget headroom vs the 120 s watchdog) | `StartupThisAP` was called sequentially with a 5 s timeout per AP. On the 16-thread Dell target that is 75 s of worst-case bring-up against a 120 s firmware watchdog — too close for comfort if a single AP's MSR path happened to be slow. Reduced to 2 s per AP (30 s worst case), with the rationale and the budget calculation documented at the call site. A single VMLAUNCH on a modern core completes in milliseconds; 2 s is still an order-of-magnitude ceiling. |
+| 99 | Open Issue 2 fail-safe (post-EBS devirtualization) | The asm shutdown stub routes through `HvAsmSwitchToGuest`, which fetches instructions AFTER the `mov cr3` to guest tables — a VA the guest's page tables don't map, so the next fetch #PFs with no handler and triple-faults the machine. Pre-EBS the guest IS the firmware whose identity map covers the stub, so the path is safe; post-EBS it is not. Pass 99 adds a post-EBS short-circuit to `HvDevirtualizeThisCpu`: if the mailbox's `EBS_OK` flag is set, inject `#UD(0)` into the guest (so the architectural event surfaces — Windows bugchecks with a stack trace rather than hard-resetting) and return `TRUE` so the asm stub takes the VMRESUME path, not the shutdown path. Pre-EBS behaviour is unchanged. This narrows Open Issue 2 from "any unmodelled exit reaches a triple-fault" to "any unmodelled exit injects a #UD the OS can report". |
 
 ---
 
