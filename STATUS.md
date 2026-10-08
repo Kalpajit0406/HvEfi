@@ -175,7 +175,7 @@ The next step is the hardware ladder (B0, B1, B2), described below.
 
 ## Open Issue 2 — Post-ExitBootServices Devirtualization
 
-**Status**: Fail-safe added in Pass 99; a true devirt path is still future work.
+**Status**: Fail-safe + cooperative true-path both added in Pass 99.
 
 If the hypervisor needs to devirtualize after `ExitBootServices` (e.g., the
 OS requests VMXOFF via an unload hypercall), the `HvAsmSwitchToGuest` routine
@@ -194,14 +194,21 @@ the stub takes the VMRESUME path, never VMXOFF. The guest's own IDT then
 takes the `#UD`; a modern OS bugchecks with a stack trace naming the exit
 reason, which is strictly better than a silent hard reset.
 
-**Still future work**: an actual runtime unload path from the EFI tree. That
-needs a devirtualization sequence that operates with the guest's own page
-tables (via VMCS guest CR3) rather than the host's identity map — for
-example, by placing the switch stub in a page that is mapped at the SAME
-virtual address in both the host and the guest, which Windows does not
-guarantee without `SetVirtualAddressMap` cooperation. Not needed for boot
-or steady-state VMX; mentioned here because the `HvAsmSwitchToGuest` entry
-in `hv_asm.asm` still carries the pre-EBS precondition note.
+**True cooperative path (Pass 99)**: a kernel driver that wants a working
+post-EBS unload registers a GUEST VA that maps the same physical page as
+`HvAsmSwitchToGuest`, via `HV_HYPERCALL_REGISTER_DEVIRT_VA` (0x0015). The
+hypercall walks the caller's CR3 and validates the mapping before storing
+it; the asm shutdown path then jumps through that kernel VA instead of the
+firmware VA. Because the kernel VA is mapped under the guest's CR3 (that's
+how the walk resolved it), the instruction fetch after `mov cr3` inside
+the stub lands at a valid page, and the stub's `push r10 / push r8 /
+push r9 / iretq` tail executes correctly. The HvDrv (kernel-driver) side
+of the handshake is tracked in that tree.
+
+The firmware-VA path remains the default — pre-EBS it is always safe
+(the firmware's identity map covers the stub), and post-EBS without a
+registered VA the fail-safe (inject #UD, keep VMX) prevents the triple
+fault that was the original Open Issue 2 brick.
 
 ---
 
@@ -251,6 +258,8 @@ pattern. A missing line narrows the failure to a specific code path.
 | 99 | IDT_VECTORING re-inject race | `HandleNmi` and the newly reinstated `HandleExternalInterrupt` both wrote `VMCS_ENTRY_INTERRUPTION_INFO` unconditionally, which could clobber an IDT-vectoring event in flight (SDM §27.2.4) — the exit handler's generic re-inject block then skipped it because the valid bit was already set, so an in-flight exception was silently dropped. Pass 99 makes both handlers check `VMCS_IDT_VECTORING_INFO` first and defer to the generic re-inject when its valid bit is set; the new interrupt or NMI is dropped once rather than corrupting an in-flight exception. |
 | 99 | Per-AP timeout tightened (budget headroom vs the 120 s watchdog) | `StartupThisAP` was called sequentially with a 5 s timeout per AP. On the 16-thread Dell target that is 75 s of worst-case bring-up against a 120 s firmware watchdog — too close for comfort if a single AP's MSR path happened to be slow. Reduced to 2 s per AP (30 s worst case), with the rationale and the budget calculation documented at the call site. A single VMLAUNCH on a modern core completes in milliseconds; 2 s is still an order-of-magnitude ceiling. |
 | 99 | Open Issue 2 fail-safe (post-EBS devirtualization) | The asm shutdown stub routes through `HvAsmSwitchToGuest`, which fetches instructions AFTER the `mov cr3` to guest tables — a VA the guest's page tables don't map, so the next fetch #PFs with no handler and triple-faults the machine. Pre-EBS the guest IS the firmware whose identity map covers the stub, so the path is safe; post-EBS it is not. Pass 99 adds a post-EBS short-circuit to `HvDevirtualizeThisCpu`: if the mailbox's `EBS_OK` flag is set, inject `#UD(0)` into the guest (so the architectural event surfaces — Windows bugchecks with a stack trace rather than hard-resetting) and return `TRUE` so the asm stub takes the VMRESUME path, not the shutdown path. Pre-EBS behaviour is unchanged. This narrows Open Issue 2 from "any unmodelled exit reaches a triple-fault" to "any unmodelled exit injects a #UD the OS can report". |
+| 99 | Open Issue 2 true path (cooperative devirt) | A kernel driver can now register a GUEST VA that maps the same physical page as the `HvAsmSwitchToGuest` asm stub via a new authenticated hypercall `HV_HYPERCALL_REGISTER_DEVIRT_VA` (0x0015). The hypercall validates the mapping by walking the caller's CR3 and comparing the resolved PA to the stub's physical page. On success the kernel VA is stored in a standalone global `g_HvDevirtKernelStubVa`; the asm shutdown path now reads that global and jumps through it instead of the firmware VA when non-zero. Because the kernel VA is mapped under the GUEST CR3 (that's how the walk resolved it), the instruction fetch after `mov cr3` inside the stub lands at a valid page and the `push r10 / push r8 / push r9 / iretq` tail executes correctly — a working post-EBS unload, not just a fail-safe. The firmware VA path remains for pre-EBS and for callers that never register one. |
+| 99 | 11 missing defensive exit handlers (regression recovery) | STATUS.md's Pass 97 entry claims 12 defensive handlers were added for `PENDING_INTERRUPT`, `TASK_SWITCH`, `DR_ACCESS`, `IO`, `RDPMC`, `RDTSC`, `RSM`, `MWAIT`, `MONITOR`, `GDTR_IDTR`, `LDTR_TR`, `RDTSCP`. In fact only `PENDING_INTERRUPT` was in the dispatcher — the other 11 fell through to `default`, which devirtualizes. On any CPU that forces one of those controls to 1 via FIXED0 (uncommon but possible, especially for I/O and DR access), a single such instruction would silently tear down the hypervisor. Pass 99 adds all 11 as a fallthrough group that `AdvanceGuestRip()`s. Pre-EBS the semantic loss (an uncaptured RDTSC, a dropped MOV DR) is acceptable survival; post-EBS the fail-safe above still catches it anyway. |
 | 99 | Cross-compiler build enablement (Linux + CLANGPDB) | Previously the module could only be built on Windows with MSVC + ml64. Pass 99 adds three small, strictly-additive cross-build hooks: (1) `#ifndef DECLSPEC_ALIGN` guards around hvdefs.h's two `__declspec(align(x))` definitions so a shim can predefine the GCC spelling; (2) `#ifndef HV_CROSS_SKIP_INTRIN_REDECLS` around hvdefs.h's MSVC-only intrinsic redeclarations so clang+mingw's intrinsics win when they conflict; (3) an `HV_FORCEINLINE` macro in `shared/hv_siphash.h` that routes to `__forceinline` on MSVC and `inline __attribute__((always_inline))` on GCC/Clang. The Windows build sees exactly the same code generation (all three guards are no-ops when the shim is absent). Enables `build -t CLANGPDB` on Linux with mingw-w64 headers + a per-module shim; proven in Pass 99 by producing a 188 KB `HvEfi.efi` from the current tree and booting it under QEMU+OVMF with the correct POST byte stream (`B0 B1 B2 B3` = safe-mode stand-down, matching the entry-preamble POST map). |
 
 ### Pass 99 build & boot proof

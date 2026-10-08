@@ -67,6 +67,10 @@ EXTERN HvExitHandler : PROC
 EXTERN HvCaptureUnloadState : PROC
 EXTERN HvUnloadRestoreState : PROC
 EXTERN HvHostException : PROC
+; Open Issue 2 cooperative devirt target (see HvEfi/hv_efi_hypercall.c).
+; A 64-bit cell in HV_GLOBAL; the asm reads it to decide whether to jump
+; through a kernel VA (non-zero) or the firmware VA (zero).
+EXTERN g_HvDevirtKernelStubVa : QWORD
 
 ; Extended-state save policy, resolved once at init in HvVmxInitialize so the
 ; exit path never executes CPUID. A CPUID on every exit and every resume added
@@ -303,7 +307,22 @@ _vmexit_do_vmxoff:
     mov     r10, [rax + HV_US_RFLAGS]
     add     rsp, 216
     pop     rax                     ; guest RAX back (hypercall result)
-    jmp     HvAsmSwitchToGuest       ; noreturn
+    ; Open Issue 2 cooperative devirt: when a kernel driver has registered a
+    ; guest VA mapping the HvAsmSwitchToGuest page (via
+    ; HV_HYPERCALL_REGISTER_DEVIRT_VA), jump through it instead of the
+    ; firmware VA. The physical destination is the same (registration
+    ; verified they resolve to the same page), but the kernel VA is also
+    ; mapped under the GUEST CR3, so the instruction fetch after `mov cr3`
+    ; inside the stub lands at a valid page in the guest's address space -
+    ; i.e. the stub's remaining pushes/iretq don't #PF. Pre-EBS or when no
+    ; VA has been registered (DevirtKernelStubVa==0), fall through to the
+    ; firmware VA, which the firmware's identity map still covers.
+    mov     r11, qword ptr [g_HvDevirtKernelStubVa]
+    test    r11, r11
+    jz      _devirt_fw_va
+    jmp     r11                     ; cooperative: jump to kernel VA
+_devirt_fw_va:
+    jmp     HvAsmSwitchToGuest       ; firmware VA (pre-EBS, or unregistered)
 
 HvAsmVmxEntry ENDP
 

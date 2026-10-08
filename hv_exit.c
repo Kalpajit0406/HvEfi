@@ -996,6 +996,11 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   // is always safe: it makes the guest skip the instruction. The functional
   // loss (a dropped DR write, an unemulated IN) is acceptable as a survival
   // strategy for a control bit we never asked for.
+  //
+  // The first group (PENDING_INTERRUPT and friends) are async / state-signalling
+  // exits with no instruction to skip - they just `break` and let VM-entry
+  // deliver whatever's pending. The second group (TASK_SWITCH .. RDTSCP) are
+  // instruction-caused exits that need RIP advanced.
   case EXIT_REASON_PENDING_INTERRUPT:
   case EXIT_REASON_APIC_WRITE:
   case EXIT_REASON_VIRTUALIZED_EOI:
@@ -1005,6 +1010,28 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   case EXIT_REASON_BUS_LOCK:
   case EXIT_REASON_NOTIFICATION:
   case EXIT_REASON_INSTRUCTION_TIMEOUT:
+    break;
+
+  // Instruction-caused exits whose VMCS controls we never set but which some
+  // CPUs may still force via FIXED0 (or that fire from obscure guest state
+  // this driver has not been seen to encounter). Each is an instruction the
+  // guest just tried to execute, so we advance guest RIP past it; the semantic
+  // loss (an uncaptured RDTSC read, a dropped MOV DR, an unemulated IN/OUT) is
+  // a far better outcome than devirtualizing a running system. Pass 99
+  // reinstates these cases - Pass 97 was documented as adding them but the
+  // code shipped without any of them in the dispatcher.
+  case EXIT_REASON_TASK_SWITCH:
+  case EXIT_REASON_DR_ACCESS:
+  case EXIT_REASON_IO:
+  case EXIT_REASON_RDPMC:
+  case EXIT_REASON_RDTSC:
+  case EXIT_REASON_RSM:
+  case EXIT_REASON_MWAIT:
+  case EXIT_REASON_MONITOR:
+  case EXIT_REASON_GDTR_IDTR:
+  case EXIT_REASON_LDTR_TR:
+  case EXIT_REASON_RDTSCP:
+    AdvanceGuestRip();
     break;
 
   case EXIT_REASON_INIT:
