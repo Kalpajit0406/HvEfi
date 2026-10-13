@@ -388,35 +388,66 @@ static __inline UINT32 HvEptMemTypeFromMtrr(UINT8 mtrrType, BOOLEAN paInRam) {
     return paInRam ? EPT_MEMORY_TYPE_WB : EPT_MEMORY_TYPE_UC;
 }
 
-// ── Scatter-gather read contract ────────────────────────────────────────────
+// ── Scatter-gather read contract ──────────────────────────────────────────
 // Wire format for HV_HYPERCALL_READ_SCATTER:
 //   p1 = GVA of HV_SCATTER_REQUEST (in caller's virtual address space)
-//   p2 = GVA of flat output buffer (Count * PAGE_SIZE max)
+//   p2 = GVA of flat output buffer (Count * PAGE_SIZE + trailer max)
 //   p3 = Count (must equal Request.Count; redundant but checked)
 //
 // The hypervisor validates ALL entries before copying any (fail closed):
 // if any entry fails HvValidatePhysRange, the whole batch is rejected and no
 // bytes are written to the output buffer.
 //
-// On success, entry i's Size bytes appear at outBuf[i * PAGE_SIZE].
-// Entries beyond Count are ignored; the output buffer need not be zeroed.
+// On success, entry i's Size bytes appear at outBuf[i * PAGE_SIZE], and the
+// RESPONSE TRAILER (8 bytes: u32 RespMagic + u32 RespCount) is written at
+// outBuf[Count * PAGE_SIZE]. The caller MUST size the output buffer at
+// Count * (PAGE_SIZE + 8) and MUST check RespMagic == HV_SCATTER_MAGIC_RESP
+// and RespCount == Count before trusting any returned bytes — a driver that
+// doesn't know the trailer (or a corrupted/injected response) fails the
+// check instead of returning garbage as "data".
+//
+// Request/response magic pair (ukay-derived, docs/ukay_deep_reconstruction.md
+// R4: ukay pairs a request magic 0xDEADC0DE with a distinct completion
+// signature 0xC0FFEE00 on every transport round-trip, treating a mismatched
+// pair as a HARD failure, never a soft retry). Here: the request carries
+// HV_SCATTER_MAGIC_REQ; the hypervisor refuses to act without it, and stamps
+// HV_SCATTER_MAGIC_RESP into the trailer on success. A client that reads
+// results without checking the trailer cannot distinguish "copied pages"
+// from "a resent or hostile reply filling stale bytes".
 //
 // Both trees (WDK and EFI) share this wire format. The EFI tree reads the
 // request struct directly via the identity map (PA == VA); the WDK tree
 // translates the guest VA to a physical address before reading.
 #define HV_SCATTER_VERSION 1
 
+// Request/response magic pair. Distinct on purpose (ukay's idiom: two values,
+// one for "this is a valid request", one for "this is a completed response"
+// — the two differ so an echoed request cannot fake a completion).
+#define HV_SCATTER_MAGIC_REQ  0xDEADC0DEu
+#define HV_SCATTER_MAGIC_RESP 0xC0FFEE00u
+
 // Per-entry: read Size bytes from Gpa into outBuf[i * PAGE_SIZE].
 typedef struct {
-    UINT64 Gpa;    // source guest physical address
-    UINT32 Size;   // bytes to read (1..PAGE_SIZE)
-    UINT32 Pad;    // must be 0
+    UINT64 Gpa;        // source guest physical address
+    UINT32 Size;       // bytes to read (1..PAGE_SIZE)
+    UINT32 DescMagic;  // must be HV_SCATTER_MAGIC_REQ (dual-stamp: header + per-entry)
 } HV_SCATTER_DESC;
 
-// Top-level request struct. Caller fills Version, Count, Generation, Descs[0..Count-1].
+// Response trailer, written by the hypervisor at
+// outBuf[Count * PAGE_SIZE] after the last successful copy.
+typedef struct {
+    UINT32 RespMagic;  // HV_SCATTER_MAGIC_RESP on a real completion
+    UINT32 RespCount;  // the Count the hypervisor acted on
+} HV_SCATTER_RESPONSE;
+
+// Top-level request struct. Caller fills Version, Magic, Count, Generation,
+// Descs[0..Count-1] (each with DescMagic set). Layout is identical to v1
+// except the added 4-byte Magic field between Count and Generation.
 typedef struct {
     UINT32 Version;    // must equal HV_SCATTER_VERSION
+    UINT32 Magic;      // must equal HV_SCATTER_MAGIC_REQ
     UINT32 Count;      // number of valid Descs entries (1..HV_SCATTER_MAX_DESCS)
+    UINT32 Pad;        // must be 0 (keeps Descs[] 8-byte aligned)
     UINT64 Generation; // monotonic per-frame tag; informational only
     HV_SCATTER_DESC Descs[HV_SCATTER_MAX_DESCS];
 } HV_SCATTER_REQUEST;
@@ -428,13 +459,34 @@ static __inline UINT64 HvScatterValidate(const HV_SCATTER_REQUEST *req,
     UINT32 i;
     if (!req)                              return HV_STATUS_INVALID_PARAM;
     if (req->Version != HV_SCATTER_VERSION) return HV_STATUS_INVALID_PARAM;
+    if (req->Magic != HV_SCATTER_MAGIC_REQ) return HV_STATUS_INVALID_PARAM;
     if (req->Count == 0 ||
         req->Count > HV_SCATTER_MAX_DESCS) return HV_STATUS_INVALID_PARAM;
     if (req->Count != expectedCount)       return HV_STATUS_INVALID_PARAM;
+    if (req->Pad != 0)                     return HV_STATUS_INVALID_PARAM;
     for (i = 0; i < req->Count; i++) {
         if (req->Descs[i].Size == 0 ||
             req->Descs[i].Size > PAGE_SIZE) return HV_STATUS_INVALID_PARAM;
-        if (req->Descs[i].Pad != 0)         return HV_STATUS_INVALID_PARAM;
+        if (req->Descs[i].DescMagic != HV_SCATTER_MAGIC_REQ)
+                                         return HV_STATUS_INVALID_PARAM;
     }
+    return HV_STATUS_SUCCESS;
+}
+
+// Client-side response-trailer check (pure). The output buffer must be
+// Count * PAGE_SIZE + sizeof(HV_SCATTER_RESPONSE) bytes; the trailer lives
+// at outBuf + Count * PAGE_SIZE. Returns HV_STATUS_SUCCESS when the trailer
+// names the right magic and the right count, else INVALID_PARAM. Callers
+// treat every nonzero return as a full batch failure (fail closed, ukay's
+// "readyFlag != 2 → hard failure, never a soft retry" rule).
+static __inline UINT64 HvScatterCheckResponse(const void *outBuf, UINT32 count) {
+    const UINT8 *base = (const UINT8 *)outBuf;
+    if (!base) return HV_STATUS_INVALID_PARAM;
+    const HV_SCATTER_RESPONSE *trailer =
+        (const HV_SCATTER_RESPONSE *)(base + (UINT64)count * PAGE_SIZE);
+    if (trailer->RespMagic != HV_SCATTER_MAGIC_RESP)
+        return HV_STATUS_INVALID_PARAM;
+    if (trailer->RespCount != count)
+        return HV_STATUS_INVALID_PARAM;
     return HV_STATUS_SUCCESS;
 }

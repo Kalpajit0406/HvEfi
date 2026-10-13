@@ -96,7 +96,7 @@ rem correctly from inside %HV_EDK2_ROOT%\HvEfi\.
 set "SHARED=%SRC%shared"
 if not exist "%DST%\shared" mkdir "%DST%\shared"
 if not exist "%DST%\shared\HvDrv" mkdir "%DST%\shared\HvDrv"
-for %%F in (hv_auth.h hv_contract.h hv_copy.h hv_ept_decision.h hv_hostidt.h hv_ptwalk.h hv_ramrange.h hv_segs.h hv_siphash.h hv_smp_index.h hv_xsave.h hv_status.h) do (
+for %%F in (hv_auth.h hv_contract.h hv_copy.h hv_ept_decision.h hv_ept_gen.h hv_hookpool.h hv_hostidt.h hv_ptwalk.h hv_ramrange.h hv_segs.h hv_siphash.h hv_smp_index.h hv_xsave.h hv_status.h) do (
     if not exist "%SHARED%\%%F" (
         echo [-] Missing shared header: %SHARED%\%%F
         exit /b 1

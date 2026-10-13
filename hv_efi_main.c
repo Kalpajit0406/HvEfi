@@ -1101,9 +1101,14 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     // Register the ExitBootServices callback — the LAST action of bring-up.
     // Reaching EBS means the firmware handed off to the OS loader with the
     // hypervisor active and no hang; a successful boot is proven. The
-    // callback clears the Pending flag, writes the NV (0x07) success markers
-    // and runs the deferred ticket delete, and disarms the firmware watchdog
-    // so a slow but intact boot isn't reset.
+    // callback sets HV_MAILBOX_FLAG_EBS_OK (a memory store — the ONLY safe
+    // kind of write here), publishes EPT mutations via HvSmpBroadcastEptFlush,
+    // and disarms the firmware watchdog so a slow but intact boot isn't reset.
+    //
+    // Deliberately contains ZERO variable writes: the "released SPI lock at
+    // EBS" assumption behind the old NV writes here was never verified on
+    // hardware, and a deadlock inside this callback would reboot-loop the
+    // machine. See HvEfiOnExitBootServices and the variable-write ban above.
     //
     // Placed after every failure return on purpose: CoreStartImage unloads
     // this image on an error return (Image.c "If the image returned an error,

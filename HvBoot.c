@@ -250,6 +250,395 @@ HvBootReceiptNum (
   HvBootReceiptLine (Vol, buf);
 }
 
+// ── Heartbeat (Pass 108) ────────────────────────────────────────────────────
+//
+// A freeze inside Windows Boot Manager leaves no trace: the core cannot touch a
+// file and the mailbox page does not survive the power cycle. While the boot
+// manager runs, a periodic timer appends one short line with the hypervisor's
+// live counters: total exits, devirtualizations, VMRESUME failures and the last
+// three exits (reason/cpu/guest RIP). After a freeze the last line on disk says
+// whether exits stopped, kept climbing (exit storm) or a devirtualization fired,
+// and at which RIP. Read-only on the mailbox; the core is untouched. Capped so a
+// boot manager parked at a menu cannot grow the receipt without bound.
+#define HV_BOOT_HB_PERIOD  2500000ULL   // 250 ms in 100 ns units
+#define HV_BOOT_HB_MAX     100u
+
+STATIC EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *mHbFs      = NULL;
+STATIC volatile HV_MAILBOX              *mHbMailbox = NULL;
+STATIC EFI_FILE_PROTOCOL                *mHbRoot    = NULL;
+STATIC EFI_EVENT                        mHbEvent    = NULL;
+STATIC UINT32                           mHbSeq      = 0;
+STATIC UINT64                           mHbLastRip   = 0;
+STATIC UINT32                           mHbRipsLogged = 0;
+STATIC EFI_EVENT                        mEbsEvent    = NULL;
+
+STATIC UINTN
+HvBootHbStr (
+  IN OUT CHAR8        *Buf,
+  IN     UINTN        Idx,
+  IN     UINTN        Cap,
+  IN     CONST CHAR8  *Text
+  )
+{
+  while ((*Text != 0) && (Idx < Cap)) {
+    Buf[Idx++] = *Text++;
+  }
+  return Idx;
+}
+
+STATIC UINTN
+HvBootHbDec (
+  IN OUT CHAR8   *Buf,
+  IN     UINTN   Idx,
+  IN     UINTN   Cap,
+  IN     UINT32  Value
+  )
+{
+  CHAR8  digits[10];
+  UINTN  n = 0;
+
+  if (Value == 0) {
+    digits[n++] = '0';
+  }
+  while ((Value != 0) && (n < sizeof (digits))) {
+    digits[n++] = (CHAR8)('0' + (Value % 10u));
+    Value /= 10u;
+  }
+  while ((n > 0) && (Idx < Cap)) {
+    Buf[Idx++] = digits[--n];
+  }
+  return Idx;
+}
+
+STATIC UINTN
+HvBootHbHex (
+  IN OUT CHAR8   *Buf,
+  IN     UINTN   Idx,
+  IN     UINTN   Cap,
+  IN     UINT64  Value
+  )
+{
+  STATIC CONST CHAR8  hex[] = "0123456789ABCDEF";
+  BOOLEAN             started = FALSE;
+  INTN                shift;
+
+  for (shift = 60; shift >= 0; shift -= 4) {
+    UINT32  nib = (UINT32)((Value >> shift) & 0xF);
+    if ((nib != 0) || started || (shift == 0)) {
+      started = TRUE;
+      if (Idx < Cap) {
+        Buf[Idx++] = hex[nib];
+      }
+    }
+  }
+  return Idx;
+}
+
+STATIC UINTN
+HvBootHbByte (
+  IN OUT CHAR8   *Buf,
+  IN     UINTN   Idx,
+  IN     UINTN   Cap,
+  IN     UINT8   Value
+  )
+{
+  STATIC CONST CHAR8  hex[] = "0123456789ABCDEF";
+
+  if (Idx + 1 < Cap) {
+    Buf[Idx++] = hex[Value >> 4];
+    Buf[Idx++] = hex[Value & 0xF];
+  }
+  return Idx;
+}
+
+// ASCII file name of the last FILE_PATH node of a device path (raw node walk,
+// bounded). Returns the length written, 0 when the path carries no file name
+// (firmware-volume modules are identified by a GUID node instead).
+STATIC UINTN
+HvBootHbImageName (
+  IN  VOID   *Path,
+  OUT CHAR8  *Out,
+  IN  UINTN  Cap
+  )
+{
+  CONST UINT8  *p        = (CONST UINT8 *)Path;
+  CONST UINT8  *nameNode = NULL;
+  UINTN        nodeLen   = 0;
+  UINTN        nodes;
+  UINTN        idx = 0;
+  UINTN        i;
+
+  if (p == NULL) {
+    return 0;
+  }
+  for (nodes = 0; nodes < 32; nodes++) {
+    UINTN  len = (UINTN)p[2] | ((UINTN)p[3] << 8);
+    if ((p[0] == 0x7F) || (len < 4)) {
+      break;
+    }
+    if ((p[0] == HV_DP_TYPE_MEDIA) && (p[1] == HV_DP_SUBTYPE_FILE)) {
+      nameNode = p;
+      nodeLen  = len;
+    }
+    p += len;
+  }
+  if (nameNode == NULL) {
+    return 0;
+  }
+  for (i = 4; (i + 1 < nodeLen) && (idx < Cap); i += 2) {
+    UINT16  ch = (UINT16)(nameNode[i] | (nameNode[i + 1] << 8));
+    if (ch == 0) {
+      break;
+    }
+    Out[idx++] = ((ch >= 0x20) && (ch < 0x7F)) ? (CHAR8)ch : '?';
+  }
+  return idx;
+}
+
+// A guest RIP seen in the exit ring for the first time: say which loaded image
+// owns it (base, size, offset, file name) and dump the code around it, so the
+// loop that is spinning can be disassembled straight from the receipt.
+STATIC VOID
+HvBootHbLogRip (
+  IN UINT64  Rip
+  )
+{
+  EFI_GUID    lipGuid  = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+  EFI_HANDLE  *handles = NULL;
+  UINTN       count    = 0;
+  UINTN       i;
+  BOOLEAN     found    = FALSE;
+  CHAR8       line[256];
+  UINTN       cap = 236;
+  UINTN       idx;
+
+  if (!EFI_ERROR (gBS->LocateHandleBuffer (ByProtocol, &lipGuid, NULL, &count, &handles)) &&
+      (handles != NULL)) {
+    for (i = 0; (i < count) && !found; i++) {
+      EFI_LOADED_IMAGE_PROTOCOL  *li = NULL;
+      UINT64                     base;
+      UINT64                     size;
+
+      if (EFI_ERROR (gBS->HandleProtocol (handles[i], &lipGuid, (VOID **)&li)) || (li == NULL)) {
+        continue;
+      }
+      base = (UINT64)(UINTN)li->ImageBase;
+      size = li->ImageSize;
+      if ((Rip < base) || ((Rip - base) >= size)) {
+        continue;
+      }
+      found = TRUE;
+      idx   = 0;
+      idx = HvBootHbStr (line, idx, cap, "HB mod base=");
+      idx = HvBootHbHex (line, idx, cap, base);
+      idx = HvBootHbStr (line, idx, cap, " size=");
+      idx = HvBootHbHex (line, idx, cap, size);
+      idx = HvBootHbStr (line, idx, cap, " rva=");
+      idx = HvBootHbHex (line, idx, cap, Rip - base);
+      idx = HvBootHbStr (line, idx, cap, " name=");
+      {
+        CHAR8  nm[64];
+        UINTN  n = HvBootHbImageName (li->FilePath, nm, sizeof (nm));
+        UINTN  j;
+        if (n == 0) {
+          idx = HvBootHbStr (line, idx, cap, "-");
+        }
+        for (j = 0; (j < n) && (idx < cap); j++) {
+          line[idx++] = nm[j];
+        }
+      }
+      line[idx] = 0;
+      HvBootReceiptLine (mHbRoot, line);
+    }
+    gBS->FreePool (handles);
+  }
+
+  if (!found) {
+    idx = 0;
+    idx = HvBootHbStr (line, idx, cap, "HB mod none rip=");
+    idx = HvBootHbHex (line, idx, cap, Rip);
+    line[idx] = 0;
+    HvBootReceiptLine (mHbRoot, line);
+  }
+
+  // Code bytes: 40 before / 40 after the RIP, clamped to its own page so the
+  // read can never touch an unmapped neighbour.
+  if (Rip >= 0x1000) {
+    UINT64  pageStart = Rip & ~0xFFFULL;
+    UINT64  pageEnd   = pageStart + 0x1000;
+    UINT64  start     = (Rip - pageStart >= 40) ? (Rip - 40) : pageStart;
+    UINT64  end       = (pageEnd - Rip >= 40) ? (Rip + 40) : pageEnd;
+    volatile CONST UINT8  *code = (volatile CONST UINT8 *)(UINTN)start;
+    UINT64  b;
+
+    idx = 0;
+    idx = HvBootHbStr (line, idx, cap, "HB code a=");
+    idx = HvBootHbHex (line, idx, cap, start);
+    idx = HvBootHbStr (line, idx, cap, " r=");
+    idx = HvBootHbDec (line, idx, cap, (UINT32)(Rip - start));
+    idx = HvBootHbStr (line, idx, cap, " ");
+    for (b = 0; b < (end - start); b++) {
+      idx = HvBootHbByte (line, idx, cap, code[b]);
+    }
+    line[idx] = 0;
+    HvBootReceiptLine (mHbRoot, line);
+  }
+}
+
+STATIC VOID
+EFIAPI
+HvBootHeartbeatTick (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  volatile HV_MAILBOX  *mb = mHbMailbox;
+  CHAR8                line[200];
+  UINTN                cap = sizeof (line) - 1;
+  UINTN                idx = 0;
+  UINT32               total;
+  UINT32               k;
+  UINT64               newestRip = 0;
+
+  (void)Context;
+  if ((mb == NULL) || (mHbRoot == NULL)) {
+    return;
+  }
+
+  total = mb->TotalExitCount;
+
+  idx = HvBootHbStr (line, idx, cap, "HB ");
+  idx = HvBootHbDec (line, idx, cap, mHbSeq);
+  idx = HvBootHbStr (line, idx, cap, " x=");
+  idx = HvBootHbDec (line, idx, cap, total);
+  idx = HvBootHbStr (line, idx, cap, " d=");
+  idx = HvBootHbDec (line, idx, cap, mb->DevirtCount);
+  idx = HvBootHbStr (line, idx, cap, " v=");
+  idx = HvBootHbDec (line, idx, cap, mb->VmresumeFailCount);
+  idx = HvBootHbStr (line, idx, cap, " L=");
+  for (k = 1; (k <= 3) && (k <= total); k++) {
+    UINT32  slot = (total - k) & 15u;
+    UINT64  rip  = ((UINT64)mb->LastExitRipHigh[slot] << 32) | mb->LastExitRipLow[slot];
+    if (k == 1) {
+      newestRip = rip;
+    }
+    idx = HvBootHbDec (line, idx, cap, mb->LastExitReason[slot]);
+    idx = HvBootHbStr (line, idx, cap, "/");
+    idx = HvBootHbDec (line, idx, cap, mb->LastExitCpu[slot]);
+    idx = HvBootHbStr (line, idx, cap, "/");
+    idx = HvBootHbHex (line, idx, cap, rip);
+    idx = HvBootHbStr (line, idx, cap, " ");
+  }
+  line[idx] = 0;
+  HvBootReceiptLine (mHbRoot, line);
+
+  if ((newestRip != 0) && (newestRip != mHbLastRip) && (mHbRipsLogged < 6)) {
+    mHbLastRip = newestRip;
+    mHbRipsLogged++;
+    HvBootHbLogRip (newestRip);
+  }
+
+  mHbSeq++;
+  if (mHbSeq >= HV_BOOT_HB_MAX) {
+    gBS->SetTimer (Event, TimerCancel, 0);
+  }
+}
+
+// ExitBootServices notification — fires just before EFI tears down boot services.
+// If this line appears in the receipt the freeze is post-EBS (kernel phase), not
+// inside bootmgfw.efi. Uses the already-open mHbRoot volume handle.
+STATIC VOID EFIAPI
+HvBootEbsNotify (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  (VOID)Event;
+  (VOID)Context;
+  if (mHbRoot != NULL) {
+    HvBootReceiptLine (mHbRoot, "BOOT EBS");
+  }
+}
+
+STATIC VOID
+HvBootHeartbeatStart (
+  VOID
+  )
+{
+  if ((mHbFs == NULL) || (mHbMailbox == NULL) || (mHbEvent != NULL)) {
+    return;
+  }
+  if (EFI_ERROR (mHbFs->OpenVolume (mHbFs, &mHbRoot)) || (mHbRoot == NULL)) {
+    mHbRoot = NULL;
+    return;
+  }
+  mHbSeq = 0;
+  if (EFI_ERROR (gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                                   HvBootHeartbeatTick, NULL, &mHbEvent))) {
+    mHbEvent = NULL;
+    mHbRoot->Close (mHbRoot);
+    mHbRoot = NULL;
+    return;
+  }
+  if (EFI_ERROR (gBS->SetTimer (mHbEvent, TimerPeriodic, HV_BOOT_HB_PERIOD))) {
+    gBS->CloseEvent (mHbEvent);
+    mHbEvent = NULL;
+    mHbRoot->Close (mHbRoot);
+    mHbRoot = NULL;
+    return;
+  }
+
+  // Register an ExitBootServices notification so the receipt captures "BOOT EBS"
+  // if EBS fires before HvBootStartWindows returns. Failure is non-fatal: the
+  // heartbeat still works, we just lose the EBS marker.
+  {
+    EFI_GUID ebsGuid = {
+      0x27ABF055, 0xB1B8, 0x4C26,
+      {0x80, 0x48, 0x74, 0x8F, 0x37, 0xBA, 0xA2, 0xDF}
+    };
+    if (EFI_ERROR (gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                                        HvBootEbsNotify, NULL,
+                                        &ebsGuid, &mEbsEvent))) {
+      mEbsEvent = NULL;
+    }
+  }
+}
+
+STATIC VOID
+HvBootHeartbeatStop (
+  IN EFI_STATUS  StartStatus
+  )
+{
+  if (mEbsEvent != NULL) {
+    gBS->CloseEvent (mEbsEvent);
+    mEbsEvent = NULL;
+  }
+  if (mHbEvent != NULL) {
+    gBS->SetTimer (mHbEvent, TimerCancel, 0);
+    gBS->CloseEvent (mHbEvent);
+    mHbEvent = NULL;
+  }
+  if (mHbRoot != NULL) {
+    HvBootReceiptStatus (mHbRoot, "HB stop", StartStatus);
+    mHbRoot->Close (mHbRoot);
+    mHbRoot = NULL;
+  }
+}
+
+// Run the Windows Boot Manager image with the heartbeat armed around it.
+STATIC EFI_STATUS
+HvBootStartWindows (
+  IN EFI_HANDLE  WinImage
+  )
+{
+  EFI_STATUS  st;
+
+  HvBootHeartbeatStart ();
+  st = gBS->StartImage (WinImage, NULL, NULL);
+  HvBootHeartbeatStop (st);
+  return st;
+}
+
 // ── Mode file, receipt tail, mailbox ────────────────────────────────────────
 //
 // Everything in this section is this application's job alone: the 0xC core
@@ -488,12 +877,14 @@ HvBootMailboxSetup (
 
   HV_MAILBOX leftover;
   BOOLEAN hasLeftover = FALSE;
+  UINT64 leftoverPa = 0;
 
   // Snapshot leftover BEFORE AllocatePages zeroes the memory
   for (i = 0; i < sizeof (mFixedMailboxPa) / sizeof (mFixedMailboxPa[0]); i++) {
     volatile HV_MAILBOX *candidate = (volatile HV_MAILBOX *)(UINTN)mFixedMailboxPa[i];
     if (HvMailboxValid (candidate) && (HvMailboxSeq (candidate) != 0)) {
       CopyMem (&leftover, (VOID *)(UINTN)candidate, sizeof (HV_MAILBOX));
+      leftoverPa = mFixedMailboxPa[i];
       hasLeftover = TRUE;
       break;
     }
@@ -521,6 +912,19 @@ HvBootMailboxSetup (
       HvBootReceiptLine (Vol, "BOOT WARN no mailbox");
       return;
     }
+  }
+
+  // Only honor a leftover that came from the page we actually own this boot.
+  // AllocateAddress succeeding at X proves the firmware considers X free RAM,
+  // so a valid mailbox there is a previous boot's warm-reset remnant — the
+  // case this diagnostic was built for. A leftover snapshotted from any other
+  // address is from a page the firmware did not hand us; reporting it would
+  // launder firmware-owned memory into the receipt as "CORE LAST" evidence,
+  // and a phantom stage is worse than a missing one (it sends the next
+  // diagnosis chasing a hang that never happened). The magic check alone is
+  // not proof of ownership.
+  if (hasLeftover && (leftoverPa != (UINT64)pa)) {
+    hasLeftover = FALSE;
   }
 
   // Record the mailbox PA to the receipt as a diagnostic so a hang can be
@@ -1016,7 +1420,7 @@ HvBootTryChainSlot (
     *VolRef = NULL;
   }
 
-  status = gBS->StartImage (winImage, NULL, NULL);
+  status = HvBootStartWindows (winImage);
 
   gBS->FreePool (buffer);
   return status;
@@ -1079,7 +1483,7 @@ HvBootChainloadWindows (
           (*VolRef)->Close (*VolRef);
           *VolRef = NULL;
         }
-        return gBS->StartImage (winImage, NULL, NULL);
+        return HvBootStartWindows (winImage);
       }
       if (VolRef != NULL && *VolRef != NULL) {
         HvBootReceiptStatus (*VolRef, "CHAIN WARN esp LoadImage", status);
@@ -1102,7 +1506,7 @@ HvBootChainloadWindows (
         HvBootReceiptLine (*VolRef, "CHAIN WIN buf start");
         (*VolRef)->Close (*VolRef);
         *VolRef = NULL;
-        return gBS->StartImage (winImage, NULL, NULL);
+        return HvBootStartWindows (winImage);
       }
       if (*VolRef != NULL) {
         HvBootReceiptStatus (*VolRef, "CHAIN FAIL buf LoadImage", status);
@@ -1215,6 +1619,13 @@ HvBootMain (
   // be observed at all - it opens no file and reads no variable. Allocated
   // before the core is loaded; the address travels in LoadOptions below.
   HvBootMailboxSetup (vol, mailboxFlags, &mbox);
+  mHbFs = fs;
+  if (mbox.Pa != 0) {
+    volatile HV_MAILBOX *hbMb = (volatile HV_MAILBOX *)(UINTN)mbox.Pa;
+    if (HvMailboxValid (hbMb)) {
+      mHbMailbox = hbMb;
+    }
+  }
   if ((mbox.Pa != 0) && (mbox.LeftStage != 0xFFFFFFFFu)) {
     // A previous boot left a WRITTEN mailbox behind: it stopped before coming
     // back through this function normally (a hang, or a reset). The stage it

@@ -458,6 +458,19 @@ static UINT64 HcReadScatter(PVCPU vcpu, UINT64 reqVa, UINT64 outBufVa,
         if (cs != HvCopyOk)
             return HvCopyStatusToHvStatus(cs);
     }
+
+    // Response trailer (hv_contract.h): stamp the completion signature and
+    // the count acted on, at outBuf + Count*PAGE_SIZE. Count*PAGE_SIZE is
+    // page-aligned, so the 8-byte trailer sits inside exactly one user page.
+    // Identity map: translate then dereference directly.
+    HV_SCATTER_RESPONSE resp;
+    resp.RespMagic = HV_SCATTER_MAGIC_RESP;
+    resp.RespCount = (UINT32)local_req.Count;
+    UINT64 trailerVa = outBufVa + (UINT64)local_req.Count * PAGE_SIZE;
+    UINT64 trailerPa = TranslateUserPage(callerCr3, trailerVa, TRUE);
+    if (trailerPa == (UINT64)-1)
+        return HV_STATUS_ACCESS_DENIED;
+    RtlCopyMemory(PhysToVirt(trailerPa), &resp, sizeof(resp));
     return HV_STATUS_SUCCESS;
 }
 
