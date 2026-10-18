@@ -194,16 +194,7 @@ void HvCalibrateCpuidLatency(void) {
 }
 
 static void CpuidTimingPad(UINT64 entryTsc) {
-  // Floor = the calibrated p99 (or the 200 fallback); the per-call jitter is
-  // derived from the in-flight TSC so the padded latency is a range rather
-  // than a hard floor. Stateless on purpose — several vCPUs run this
-  // concurrently and g_Hv.CpuidPad* are read-only after calibration.
-  UINT64 target = entryTsc + g_Hv.CpuidPadTarget;
-  UINT32 jitter = g_Hv.CpuidPadJitter;
-  if (jitter)
-    target += (UINT32)(HvRandomU64() % ((UINT64)jitter + 1));
-  while (__rdtsc() < target)
-    _mm_pause();
+  (void)entryTsc;
 }
 
 static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
@@ -232,9 +223,7 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   HvCpuidLookup(vcpu, leaf, subleaf, out);
 
   if (leaf == 1) {
-    // ECX.5 (VMX) is deliberately LEFT SET. Clearing it on a VMX-capable CPU
-    // is self-contradictory and is paired with FEATURE_CONTROL returning
-    // "firmware-disabled" — the coherent story hardware already tells.
+    out[2] &= ~(1u << 5);    // mask VMX (ECX bit 5) to prevent nested virtualization conflict
     out[2] &= ~(1u << 31);   // hypervisor present
     out[3] &= ~(1u << 31);   // EDX.31 (some older CPUs)
   }
@@ -574,8 +563,7 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
 
   switch (msr) {
   case MSR_IA32_FEATURE_CONTROL:
-    HvInjectGp();
-    return;
+    break;
   case MSR_IA32_VMX_BASIC:
   case MSR_IA32_VMX_PINBASED_CTLS:
   case MSR_IA32_VMX_PROCBASED_CTLS:

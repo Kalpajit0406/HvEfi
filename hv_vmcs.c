@@ -237,8 +237,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
         PROC_BASED_USE_TSC_OFFSET,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
-    HvVmWriteChecked(VMCS_TSC_OFFSET,
-                  (UINT64)(INT64)(g_Hv.TscBootOffset ^ (INT64)vcpu->ProcessorIndex));
+    HvVmWriteChecked(VMCS_TSC_OFFSET, (UINT64)g_Hv.TscBootOffset);
 
     // Secondary: EPT, VPID, RDTSCP, INVPCID, XSAVES, unrestricted guest.
     // Unrestricted guest is required for INIT-SIPI AP bringup: the OS sends
