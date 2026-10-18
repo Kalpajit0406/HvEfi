@@ -215,17 +215,27 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
     return TRUE;
   }
 
-  // Every leaf — including the 0x40000000 hypervisor range — is answered by
-  // running real CPUID and memoising it. A bare-metal CPU returns the highest
-  // standard leaf's data for every out-of-range leaf, so all extended leaves
-  // must agree. The old code synthesised (maxleaf,0,0,0) for 0x40000000 — a
-  // response no CPU ever returns, exactly what hvdetect cross-leaf checks catch.
+  // Hypervisor synthetic leaves (0x40000000 - 0x400000FF):
+  // Since we mask hypervisor presence (CPUID.1:ECX[31] = 0), any query in this
+  // synthetic range must return all zeros (EAX=0 max leaf) so that Windows Boot
+  // Manager's hypervisor probe definitely detects that no hypervisor enlightenment
+  // interface is present.
+  if (leaf >= 0x40000000 && leaf <= 0x400000FF) {
+    regs->Rax = 0;
+    regs->Rbx = 0;
+    regs->Rcx = 0;
+    regs->Rdx = 0;
+    CpuidTimingPad(entryTsc);
+    AdvanceGuestRip();
+    return TRUE;
+  }
+
+  // Every other leaf is answered by running real CPUID and memoising it.
   HvCpuidLookup(vcpu, leaf, subleaf, out);
 
   if (leaf == 1) {
     out[2] &= ~(1u << 5);    // mask VMX (ECX bit 5) to prevent nested virtualization conflict
     out[2] &= ~(1u << 31);   // hypervisor present
-    out[3] &= ~(1u << 31);   // EDX.31 (some older CPUs)
   }
 
   regs->Rax = out[0];
@@ -778,7 +788,9 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     }
   }
   UINT64 rip = 0;
+  UINT64 rsp = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
+  __vmx_vmread(VMCS_GUEST_RSP, &rsp);
 
   if ((reason < 64 && g_Hv.ExitCounts[reason] < 3) || reason == EXIT_REASON_TRIPLE_FAULT || reason == EXIT_REASON_EPT_MISCONFIG) {
     EfiPrint("[VMEXIT] cpu=%u reason=%u rip=0x%lx\n", vcpu ? vcpu->ProcessorIndex : 0, reason, rip);
@@ -787,8 +799,7 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
 
   // Runtime Exit Log Ring Buffer (Pass 96)
   {
-    UINT64 rsp = 0, qual = 0;
-    __vmx_vmread(VMCS_GUEST_RSP, &rsp);
+    UINT64 qual = 0;
     __vmx_vmread(VMCS_EXIT_QUALIFICATION, &qual);
     LONG64 logIdx = InterlockedIncrement64(&g_Hv.ExitLogIndex) - 1;
     UINT32 ringSlot = (UINT32)(logIdx & 63);
@@ -806,6 +817,22 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     g_Mailbox->LastExitCpu[idx]     = vcpu ? vcpu->ProcessorIndex : 0xFFFFFFFFu;
     g_Mailbox->LastExitRipLow[idx]  = (UINT32)rip;
     g_Mailbox->LastExitRipHigh[idx] = (UINT32)(rip >> 32);
+    if (reason == EXIT_REASON_CPUID && regs != NULL) {
+      g_Mailbox->LastExitLeaf[idx]    = (UINT32)regs->Rax;
+      g_Mailbox->LastExitSubleaf[idx] = (UINT32)regs->Rcx;
+      UINT64 caller = 0;
+      if (rsp >= 0x1000 && rsp < 0x1000000000ULL) {
+        // In AsmCpuid, 3 registers (rbx, rax, rdx) were pushed, so return address is at rsp + 24
+        caller = *(volatile UINT64*)(UINTN)(rsp + 24);
+      }
+      g_Mailbox->LastExitCallerRipLow[idx]  = (UINT32)caller;
+      g_Mailbox->LastExitCallerRipHigh[idx] = (UINT32)(caller >> 32);
+    } else {
+      g_Mailbox->LastExitLeaf[idx]          = 0;
+      g_Mailbox->LastExitSubleaf[idx]       = 0;
+      g_Mailbox->LastExitCallerRipLow[idx]  = 0;
+      g_Mailbox->LastExitCallerRipHigh[idx] = 0;
+    }
     g_Mailbox->TotalExitCount++;
   }
 

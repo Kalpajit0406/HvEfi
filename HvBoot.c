@@ -275,9 +275,10 @@ STATIC volatile HV_MAILBOX              *mHbMailbox = NULL;
 STATIC EFI_FILE_PROTOCOL                *mHbRoot    = NULL;
 STATIC EFI_EVENT                        mHbEvent    = NULL;
 STATIC UINT32                           mHbSeq      = 0;
-STATIC UINT64                           mHbLastRip   = 0;
+STATIC UINT64                           mHbLastRip    = 0;
+STATIC UINT64                           mHbLastCallerRip = 0;
 STATIC UINT32                           mHbRipsLogged = 0;
-STATIC EFI_EVENT                        mEbsEvent    = NULL;
+STATIC EFI_EVENT                        mEbsEvent     = NULL;
 
 STATIC UINTN
 HvBootHbStr (
@@ -362,6 +363,61 @@ HvBootHbByte (
 // bounded). Returns the length written, 0 when the path carries no file name
 // (firmware-volume modules are identified by a GUID node instead).
 STATIC UINTN
+HvBootHbExtractPdb (
+  IN  VOID   *ImageBase,
+  OUT CHAR8  *Out,
+  IN  UINTN  Cap
+  )
+{
+  CONST UINT8  *base = (CONST UINT8 *)ImageBase;
+  UINT32       peOffset;
+  UINT32       debugRva;
+  UINT32       debugSize;
+  UINTN        idx = 0;
+  UINTN        i;
+
+  if ((base == NULL) || (Cap < 2)) {
+    return 0;
+  }
+  if (*(CONST UINT16 *)base != 0x5A4D) {
+    return 0;
+  }
+  peOffset = *(CONST UINT32 *)(base + 0x3C);
+  if ((peOffset > 0x1000) || (*(CONST UINT32 *)(base + peOffset) != 0x00004550)) {
+    return 0;
+  }
+  if (*(CONST UINT16 *)(base + peOffset + 24) != 0x020B) {
+    return 0;
+  }
+  debugRva  = *(CONST UINT32 *)(base + peOffset + 184);
+  debugSize = *(CONST UINT32 *)(base + peOffset + 188);
+  if ((debugRva != 0) && (debugSize >= 28) && (debugRva < 0x10000000)) {
+    CONST UINT8  *debugEntry = base + debugRva;
+    UINT32       type        = *(CONST UINT32 *)(debugEntry + 12);
+    UINT32       dataRva     = *(CONST UINT32 *)(debugEntry + 20);
+    if ((type == 2) && (dataRva != 0) && (dataRva < 0x10000000)) {
+      CONST UINT8  *cv = base + dataRva;
+      if (*(CONST UINT32 *)cv == 0x53445352) { // 'RSDS'
+        CONST CHAR8  *pdb       = (CONST CHAR8 *)(cv + 24);
+        CONST CHAR8  *lastSlash = pdb;
+        for (i = 0; (pdb[i] != 0) && (i < 260); i++) {
+          if ((pdb[i] == '\\') || (pdb[i] == '/')) {
+            lastSlash = &pdb[i + 1];
+          }
+        }
+        for (i = 0; (lastSlash[i] != 0) && (idx < Cap - 1); i++) {
+          CHAR8  c = lastSlash[i];
+          Out[idx++] = ((c >= 0x20) && (c < 0x7F)) ? c : '?';
+        }
+        Out[idx] = 0;
+        return idx;
+      }
+    }
+  }
+  return 0;
+}
+
+STATIC UINTN
 HvBootHbImageName (
   IN  VOID   *Path,
   OUT CHAR8  *Out,
@@ -370,6 +426,7 @@ HvBootHbImageName (
 {
   CONST UINT8  *p        = (CONST UINT8 *)Path;
   CONST UINT8  *nameNode = NULL;
+  CONST UINT8  *guidNode = NULL;
   UINTN        nodeLen   = 0;
   UINTN        nodes;
   UINTN        idx = 0;
@@ -387,19 +444,51 @@ HvBootHbImageName (
       nameNode = p;
       nodeLen  = len;
     }
+    if ((p[0] == HV_DP_TYPE_MEDIA) && (p[1] == 0x06) && (len >= 20)) {
+      guidNode = p;
+    }
     p += len;
   }
-  if (nameNode == NULL) {
-    return 0;
-  }
-  for (i = 4; (i + 1 < nodeLen) && (idx < Cap); i += 2) {
-    UINT16  ch = (UINT16)(nameNode[i] | (nameNode[i + 1] << 8));
-    if (ch == 0) {
-      break;
+  if (nameNode != NULL) {
+    for (i = 4; (i + 1 < nodeLen) && (idx < Cap); i += 2) {
+      UINT16  ch = (UINT16)(nameNode[i] | (nameNode[i + 1] << 8));
+      if (ch == 0) {
+        break;
+      }
+      Out[idx++] = ((ch >= 0x20) && (ch < 0x7F)) ? (CHAR8)ch : '?';
     }
-    Out[idx++] = ((ch >= 0x20) && (ch < 0x7F)) ? (CHAR8)ch : '?';
+    return idx;
   }
-  return idx;
+  if (guidNode != NULL && Cap >= 37) {
+    STATIC CONST CHAR8 hex[] = "0123456789ABCDEF";
+    UINT32 d1 = *(CONST UINT32 *)(guidNode + 4);
+    UINT16 d2 = *(CONST UINT16 *)(guidNode + 8);
+    UINT16 d3 = *(CONST UINT16 *)(guidNode + 10);
+    CONST UINT8 *d4 = guidNode + 12;
+    CHAR8 gb[37];
+    UINTN gi = 0;
+    UINTN k;
+    for (k = 0; k < 8; k++) gb[gi++] = hex[(d1 >> (28 - 4*k)) & 0xF];
+    gb[gi++] = '-';
+    for (k = 0; k < 4; k++) gb[gi++] = hex[(d2 >> (12 - 4*k)) & 0xF];
+    gb[gi++] = '-';
+    for (k = 0; k < 4; k++) gb[gi++] = hex[(d3 >> (12 - 4*k)) & 0xF];
+    gb[gi++] = '-';
+    for (k = 0; k < 2; k++) {
+      gb[gi++] = hex[(d4[k] >> 4) & 0xF];
+      gb[gi++] = hex[d4[k] & 0xF];
+    }
+    gb[gi++] = '-';
+    for (k = 2; k < 8; k++) {
+      gb[gi++] = hex[(d4[k] >> 4) & 0xF];
+      gb[gi++] = hex[d4[k] & 0xF];
+    }
+    gb[gi] = 0;
+    for (k = 0; k < gi && idx < Cap - 1; k++) Out[idx++] = gb[k];
+    Out[idx] = 0;
+    return idx;
+  }
+  return 0;
 }
 
 // A guest RIP seen in the exit ring for the first time: say which loaded image
@@ -445,13 +534,17 @@ HvBootHbLogRip (
       idx = HvBootHbStr (line, idx, cap, " name=");
       {
         CHAR8  nm[64];
-        UINTN  n = HvBootHbImageName (li->FilePath, nm, sizeof (nm));
-        UINTN  j;
+        UINTN  n = HvBootHbExtractPdb (li->ImageBase, nm, sizeof (nm));
+        if (n == 0) {
+          n = HvBootHbImageName (li->FilePath, nm, sizeof (nm));
+        }
         if (n == 0) {
           idx = HvBootHbStr (line, idx, cap, "-");
-        }
-        for (j = 0; (j < n) && (idx < cap); j++) {
-          line[idx++] = nm[j];
+        } else {
+          UINTN  j;
+          for (j = 0; (j < n) && (idx < cap); j++) {
+            line[idx++] = nm[j];
+          }
         }
       }
       line[idx] = 0;
@@ -500,12 +593,13 @@ HvBootHeartbeatTick (
   )
 {
   volatile HV_MAILBOX  *mb = mHbMailbox;
-  CHAR8                line[200];
+  CHAR8                line[384];
   UINTN                cap = sizeof (line) - 1;
   UINTN                idx = 0;
   UINT32               total;
   UINT32               k;
   UINT64               newestRip = 0;
+  UINT64               newestCallerRip = 0;
 
   (void)Context;
   if ((mb == NULL) || (mHbRoot == NULL)) {
@@ -534,15 +628,34 @@ HvBootHeartbeatTick (
     idx = HvBootHbDec (line, idx, cap, mb->LastExitCpu[slot]);
     idx = HvBootHbStr (line, idx, cap, "/");
     idx = HvBootHbHex (line, idx, cap, rip);
+    if (mb->LastExitReason[slot] == 10) {
+      UINT64 cRip = ((UINT64)mb->LastExitCallerRipHigh[slot] << 32) | mb->LastExitCallerRipLow[slot];
+      if (k == 1) {
+        newestCallerRip = cRip;
+      }
+      idx = HvBootHbStr (line, idx, cap, "[EAX=");
+      idx = HvBootHbHex (line, idx, cap, mb->LastExitLeaf[slot]);
+      idx = HvBootHbStr (line, idx, cap, " ECX=");
+      idx = HvBootHbHex (line, idx, cap, mb->LastExitSubleaf[slot]);
+      idx = HvBootHbStr (line, idx, cap, " ret=");
+      idx = HvBootHbHex (line, idx, cap, cRip);
+      idx = HvBootHbStr (line, idx, cap, "]");
+    }
     idx = HvBootHbStr (line, idx, cap, " ");
   }
   line[idx] = 0;
   HvBootReceiptLine (mHbRoot, line);
 
-  if ((newestRip != 0) && (newestRip != mHbLastRip) && (mHbRipsLogged < 6)) {
+  if ((newestRip != 0) && (newestRip != mHbLastRip) && (mHbRipsLogged < 10)) {
     mHbLastRip = newestRip;
     mHbRipsLogged++;
     HvBootHbLogRip (newestRip);
+  }
+
+  if ((newestCallerRip != 0) && (newestCallerRip != mHbLastCallerRip) && (mHbRipsLogged < 10)) {
+    mHbLastCallerRip = newestCallerRip;
+    mHbRipsLogged++;
+    HvBootHbLogRip (newestCallerRip);
   }
 
   mHbSeq++;

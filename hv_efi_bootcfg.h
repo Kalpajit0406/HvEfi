@@ -165,6 +165,10 @@ typedef struct {
     unsigned int LastExitCpu[16];
     unsigned int LastExitRipLow[16];
     unsigned int LastExitRipHigh[16];
+    unsigned int LastExitLeaf[16];
+    unsigned int LastExitSubleaf[16];
+    unsigned int LastExitCallerRipLow[16];
+    unsigned int LastExitCallerRipHigh[16];
 
     // Core Exclusion Mask (Pass 96)
     unsigned int CoreExclusionMaskLow;
