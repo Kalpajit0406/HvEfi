@@ -89,6 +89,19 @@ During recent bring-up iterations, five critical architectural and implementatio
 * **Correction of Previous Documentation**: Prior notes inaccurately claimed the presence of an "HMAC-SHA256 / FNV1a compile-time sentinel engine." That description was false.
 * **Actual Architecture**: In this codebase, the launcher (`hv_launcher.c`) patches unprovisioned EFI binaries by scanning their initialized data sections for fixed sentinel byte sequences (`NAME_SENTINEL` and `GUID_SENTINEL` for NVRAM variable resolution, and `s_TicketSentinel` for raw ticket embedding). To eliminate dependency on NVRAM variables during testing, `HvBoot.c` implements a direct `\EFI\Boot\hvticket` file fallback that loads the 32-byte secret ticket directly from disk if the mailbox is unpopulated.
 
+### Defect 6: Wire Contract Status Bit Decode and Telemetry Mirroring
+* **Location**: `HvBoot.c:1890`, `lab_detect.c:22`, and `hv_efi_smp.c:767`
+* **Vulnerability**: In `hvdefs.h`, the status wire contract is:
+  ```c
+  #define HV_STATUS_RUNNING_BIT (1ULL << 16)
+  ```
+  `HvBoot.c` previously decoded the Running bit as `(status >> 63) & 1` and `lab_detect.c` defined `HV_STATUS_RUNNING_BIT` as `(1ULL << 63)`. Consequently, even on successful bring-up where status was `0x0000000000010004` (bit 16 set, 4 vCPUs), both tools logged `Running: 0`. Additionally, receipt lines written by `HvBootReceiptLine()` were dropped on read-only ISO/CD-ROM test boots where filesystem writes fail.
+* **Resolution**:
+  1. Updated `HvBoot.c` to decode `(UINT32)((status >> 16) & 1)`, correctly reporting `Running: 1`.
+  2. Updated `lab_detect.c` to define `HV_STATUS_RUNNING_BIT (1ULL << 16)`.
+  3. Added live serial mirroring to `HvBootReceiptLine()` (`DEBUG ((DEBUG_INFO, "[HvReceipt] %a\n", Message))`), ensuring all receipt markers are captured on the virtual/hardware serial port.
+  4. Tightened devirtualize AP timeout in `hv_efi_smp.c` from 5 s to 2 s (`2000000` µs) to prevent exceeding the firmware watchdog on multi-core systems, and aligned stale comment references.
+
 ---
 
 ## 3. Code-Accurate 13-Step Hypervisor Lifecycle
@@ -114,16 +127,25 @@ The hypervisor core entry point (`HvEfiDriverEntry` in `hv_efi_main.c`) executes
 
 ---
 
----
+## 4. Verification Traces and Primary Telemetry Evidence
 
-## 4. Verification Traces and Telemetry Evidence
-
-In `HvEfi`, execution state is tracked via deterministic hardware serial output, receipt files, and shared memory mailboxes:
+Execution state is tracked via deterministic hardware serial output (`hvserial.log`), raw receipt files committed in `receipts/`, and shared memory mailboxes. Both milestones have been independently executed and captured on October 19, 2026.
 
 ### 4.1. Milestone 1 Verified Trace: Unprovisioned Differential ("CHAIN OK TO STEP 5")
-Run in VMware nested VT-x with unprovisioned binary (`hvcfg` = `'F'`, no ticket). Proves `HvBoot` -> `mailbox` -> `hvcore` -> Steps 1–4 pass, cleanly halting at Step 5 with designed `EFI_SECURITY_VIOLATION` (`0x8005`), while verifying that the VMCALL probe is safely bypassed without triggering `#UD`:
+* **Primary Evidence File**: `receipts/milestone1_step5_unprovisioned.log`
+* **Test Environment**: VMware Workstation 17.6.2 (Nested VT-x), 4 vCPUs, Windows 11 Enterprise x64 guest.
+* **Test Configuration**: Unprovisioned binaries (`HvBoot.efi` + `HvEfi.efi`), mode `'F'`, no ticket.
+* **Outcome**: Proves `HvBoot` -> `mailbox` -> `hvcore` -> Steps 1–4 execute cleanly, halting safely at Step 5 (`CORE stage=32773` / `HV_STAGE_FAIL(5)`, `BOOT FAIL StartImage st=800000000000001A` / `EFI_SECURITY_VIOLATION`). The VMCALL probe is strictly bypassed (`st != EFI_SUCCESS`), preventing #UD hangs, and Windows Boot Manager is chainloaded to `BOOT EBS`:
 
 ```text
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT WARN no ticket
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
 [HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
 [+] Step 1: VMX supported
 [+] Step 2: MP Services located
@@ -131,17 +153,38 @@ Run in VMware nested VT-x with unprovisioned binary (`hvcfg` = `'F'`, no ticket)
 [+] Step 3: Host page tables built
 [+] Step 4: Nonce generated
 [FATAL] EFI binary not provisioned — run launcher --provision --efi first
+[HvReceipt] CORE stage=32773
+[HvReceipt] CORE detail=0
+[HvReceipt] BOOT FAIL StartImage st=800000000000001A
 [HvBoot] Connecting all UEFI device drivers...
 [HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WARN slot LoadImage st=800000000000000E
 [HvBoot] ChainloadWindows: found 2 filesystem handles
 [HvBoot] Found Windows on filesystem 0! Loading image...
+[HvReceipt] CHAIN WIN fs start
 [HvBoot] Launching Windows Boot Manager...
+[HvReceipt] HB 0 x=0 d=0 v=0 L=
+[HvReceipt] HB 1 x=0 d=0 v=0 L=
+[HvReceipt] HB 2 x=0 d=0 v=0 L=
+[HvReceipt] BOOT EBS
 ```
 
-### 4.2. Milestone 2 Verified Trace: Full Provisioned Bring-Up (Steps 1 to 13 + In-Band VMCALL Probe)
-Run in VMware nested VT-x with provisioned binary (`hvcore.efi` + `HvBoot_patched.efi` + ticket). Proves all 13 steps complete, all 4 vCPUs virtualized, EPT 1075 pages cloaked, authenticated VMCALL detection probe succeeds in non-root mode, and Windows 11 chainloads under virtualization:
+### 4.2. Milestone 2 Verified Trace: Full Provisioned Bring-Up (Steps 1 to 13 + Running: 1)
+* **Primary Evidence File**: `receipts/milestone2_full_bringup_running1.log`
+* **Test Environment**: VMware Workstation 17.6.2 (Nested VT-x), 4 vCPUs, Windows 11 Enterprise x64 guest.
+* **Test Configuration**: Sentinel-patched binaries (`hvcore.efi` + `HvBoot_patched.efi` + 32-byte `hvticket`).
+* **Outcome**: All 13 steps execute cleanly. All 4 vCPUs are virtualized. EPT identity maps 512 GB with 1076 pages cloaked. The in-band VMCALL probe executes in non-root mode, proves hypervisor status `0x0000000000010004` (`vCPUs: 4, Running: 1`), passes selftest authentication, chainloads Windows Boot Manager, handles VM-exits (CR4/XSETBV Reason 55), records heartbeats, and smoothly executes through `BOOT EBS` into Windows 11:
 
 ```text
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
 [HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
 [+] Step 1: VMX supported
 [+] Step 2: MP Services located
@@ -151,63 +194,103 @@ Run in VMware nested VT-x with provisioned binary (`hvcore.efi` + `HvBoot_patche
 [+] Step 5: Ticket read from the mailbox
 [+] Step 6: Session keys derived
 [+] Step 7: Decoy pages allocated
-[VMX] EPT: 34 RAM ranges (shared with host map)
-[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD5B201E, 3 splits
+[VMX] EPT: 32 RAM ranges (shared with host map)
+[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD5B401E, 3 splits
 [+] Step 8: VMX initialized (4 CPUs, EPT ready)
-[+]   EFI image: 62 pages at 0xD59F000 (executable hide)
-[+] Step 9: 1075 pages to hide
+[+]   EFI image: 62 pages at 0xD5A1000 (executable hide)
+[+] Step 9: 1076 pages to hide
 [+] Step 10: EPT hiding complete
 [+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
 [VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
 [VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
-[VMEXIT] cpu=1 reason=31 rip=0xFB4D4BC
+[VMEXIT] c[pVuM=E0X IrTe]a scopnu==110  rreiaps=o0nx=F3A1B Cr1i3pE=0
+xFB4D4BC
 [VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
-[VMEXIT] cpu=0 reason=10 rip=0xFABC13E
 [VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
-[VMEXIT] cpu=2 reason=31 rip=0xFB4D4BC
-[+] Step 12: All 4 CPUs virtualized
-[+] Step 13: Secrets wiped from g_Hv
+[[VVMMEEXXIITT]]  ccppuu==02  rreeaassoonn==3321  rriipp==00xxFFBB44CD34BB2C
+
+[[V+M]E XSItTe]p  c1p2u:= 3A lrle a4s oCnP=U3s1  vriirpt=u0axlFiBz4eDd4B
+C[
++] Step 13: Secrets wiped from g_Hv
 
 [HvEfi] VMX hypervisor active. OS will boot under virtualization.
+
+[HvReceipt] CORE stage=13
+[HvReceipt] CORE detail=0
+[HvReceipt] EPT units=1
+[HvReceipt] EPT ranges=32
+[HvReceipt] EPT maxphys_lo=1073741824
+[HvReceipt] EPT maxphys_hi=1
+[HvReceipt] EPT splits=3
+[HvReceipt] EPT gb=512
+[HvReceipt] VMCS pin=22
+[HvReceipt] VMCS proc=2483052922
+[HvReceipt] VMCS exit=4190203
+[HvReceipt] VMCS proc2=1052842
+[HvReceipt] EXITS total=12
+[HvReceipt] FULL DONE
+[HvReceipt] BOOT DONE
 
 [HvBoot] Probing hypervisor via authenticated VMCALL...
 [HvBoot] Calculated BootMagic: 0xF869878B883CC167
 [VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
-[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x5B191B4166B656C7
-[+] [HvBoot] Session Derived! SessionMagic = 0x6645B65C399D99E9
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x14C16824EDA77A6B
+[HvReceipt] VMCALL DETECT SUCCESS
+[+] [HvBoot] Session Derived! SessionMagic = 0xE36BC9DAF507FD03
 [VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
-[+] [HvBoot] Hypervisor Status: 0x0000000000010004 (vCPUs: 4, Running: 0)
+[+] [HvBoot] Hypervisor Status: 0x0000000000010004 (vCPUs: 4, Running: 1)
+[HvReceipt] VMCALL STATUS vcpus=4
 [VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
 [+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
 
+[HvReceipt] VMCALL SELFTEST PASS
 [HvBoot] Connecting all UEFI device drivers...
 [HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WARN slot LoadImage st=800000000000000E
 [HvBoot] ChainloadWindows: found 2 filesystem handles
 [HvBoot] Found Windows on filesystem 0! Loading image...
+[HvReceipt] CHAIN WIN fs start
 [HvBoot] Launching Windows Boot Manager...
 [VMEXIT] cpu=0 reason=55 rip=0x1028720D
 [VMEXIT] cpu=0 reason=55 rip=0x10287255
 [VMEXIT] cpu=0 reason=55 rip=0xB79715
-[VMEXIT] cpu=1 reason=3  rip=0xFB4D471
-[VMEXIT] cpu=2 reason=3  rip=0xFB4D471
-[VMEXIT] cpu=3 reason=3  rip=0xFB4D471
-[VMEXIT] cpu=1 reason=4  rip=0xFB4D471
+[HvReceipt] HB 0 x=317 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB mod base=FABA000 size=4000 rva=213E name=-
+[HvReceipt] HB code a=FABC116 r=40 4883EC2089D2E8ABF9FFFFC9C3554889E54883EC20E8A6F9FFFF66C1E80983E001C9C35389C850520FA24D85C9740341890959E30289014C89C1E3028919488B4C2438E3028911585BC35389C889D150
+[HvReceipt] HB 1 x=484 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB 2 x=508 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] BOOT EBS
+[[V[VVMMEMEXEIXXTII]TT] ] c ccpppuu==u2 =1r3e a rseroeanass=3oo nn=r=3i3 p rri=ipp0==00xxFxFBFB4B4D4D4D47741171
+
+
+[VMEXIT] cpu=1 reason=4 rip=0xFB4D471
 [VMEXIT] cpu=1 reason=28 rip=0x66F
 [VMEXIT] cpu=1 reason=28 rip=0x26FB
 ```
 
-### 4.3. Telemetry Mechanisms
-1. **Receipt File (`\EFI\Boot\hvefi.log`)**:
-   Written directly to the ESP via `SimpleFileSystem` protocol.
-2. **I/O Port POST Codes (`HvPost()`)**:
-   Outputs diagnostic bytes to port `0x80` during early initialization before serial or filesystem output is available.
-3. **Shared Mailbox (`HV_MAILBOX`)**:
-   Maintains runtime counters: `HypercallCount`, `LastHypercallId`, `LastHypercallStatus`, and `Flags` (`HV_MAILBOX_FLAG_EBS_OK` set at `ExitBootServices`).
+---
 
+## 5. Dell Bare-Metal Platform Analysis (Dell G15 5530 / InsydeH2O BIOS 1.35.0)
+
+Ahead of bare-metal transition, the specific firmware architecture of the target host was evaluated:
+
+* **Host Platform**: Dell Inc. G15 5530 (Intel Core i5-13450HX, Raptor Lake-HX: 6 Performance Cores + 4 Efficient Cores = 16 logical threads).
+* **Firmware Baseline**: InsydeH2O UEFI BIOS 1.35.0 (Release Date: July 23, 2026).
+* **Firmware Peculiarities and Accommodations**:
+  1. **InsydeH2O W^X / NX Memory Protection (`PcdDxeNxMemoryProtectionPolicy`)**:
+     Modern Dell InsydeH2O enforces strict NX on `EfiBootServicesData` and `EfiRuntimeServicesData` allocations. In `hv_vmcs.c` and `hv_efi_main.c`, all executable stubs (trampolines, VMX entry points) must be allocated from `EfiBootServicesCode` / `EfiRuntimeServicesCode` or properly marked executable in CR3 to avoid `#PF` page faults during early transition.
+  2. **WhoAmI Protocol Reliability**:
+     On Dell G15 5530, `EFI_MP_SERVICES_PROTOCOL.WhoAmI()` frequently returns invalid processor handles or hangs if invoked from arbitrary AP contexts. In `hv_efi_smp.c`, the hypervisor dispatches APs individually using `StartupThisAP` where the processor index is passed explicitly as parameter context, bypassing `WhoAmI()` entirely.
+  3. **MP Services Timeout Guard**:
+     With 16 logical cores on the Raptor Lake architecture, an AP timeout of 5 seconds risked triggering Dell's 120-second firmware watchdog on wedged cores. Tightening the timeout to 2 seconds guarantees the maximum cumulative dispatch window remains under 30 seconds.
+  4. **SetVariable Firmware Deadlock Elimination**:
+     Dell InsydeH2O firmware experiences variable store deadlocks when runtime `SetVariable` calls are executed during DXE transition. `HvBoot.c` eliminates all runtime `SetVariable` deletions; the authentication ticket is consumed in-memory via the mailbox or read via the file fallback (`\EFI\Boot\hvticket`), avoiding the deadlock path completely.
 
 ---
 
-## 5. Next Steps for Production Hardening
+## 6. Next Steps for Production Hardening
 
 1. **Host EPT Hooking Engine**:
    Expand `hv_hookpool.h` to support dynamic, runtime page cloaking via `HV_HYPERCALL_TRANSLATE` and hook injection without relying on pre-allocated static tables.
@@ -217,3 +300,4 @@ Run in VMware nested VT-x with provisioned binary (`hvcore.efi` + `HvBoot_patche
    Virtualize `RDTSC`/`RDTSCP` timing when VMCS exit profiling is enabled to mitigate VM-exit timing side-channels.
 4. **Kernel Bridge Driver**:
    Develop a dedicated Windows Ring-0 companion driver (`HvBridge.sys`) to manage authenticated hypercalls, process introspection, and physical memory translation from user space.
+

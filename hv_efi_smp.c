@@ -661,7 +661,7 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
 
     // If the BSP itself failed to launch, skip the APs: the count check below
     // triggers the rollback path regardless, and attempting AP bring-up would
-    // only burn the 5 s timeout (plus a VMXON/VMLAUNCH cycle per AP) for nothing.
+    // only burn the 2 s timeout (plus a VMXON/VMLAUNCH cycle per AP) for nothing.
     if (g_Hv.VcpuCount > 1 && (UINT32)g_VmxonSuccess > 0) {
         // Dispatch each AP individually via StartupThisAP so the handle is
         // passed explicitly as context — WhoAmI is broken on the Dell G15
@@ -758,15 +758,16 @@ void HvSmpDevirtualizeAllProcessors(void) {
 
     // Devirtualize all APs
     if (g_Hv.VcpuCount > 1) {
-        // 5-second timeout, mirroring bring-up: a wedged AP must not hang the
+        // 2-second timeout, mirroring bring-up: a wedged AP must not hang the
         // BSP forever on unload. EFI_TIMEOUT is best-effort here (teardown
         // continues); any other failure is fatal-logged.
         EFI_STATUS st = gEfiMp->StartupAllAPs(
             gEfiMp,
             ApDevirtualizeCallback,
-            TRUE, NULL, 5000000, NULL,
+            TRUE, NULL, 2000000, NULL,
             NULL    // FailedCpuList - teardown does not need it
         );
+
         if (EFI_ERROR(st) && st != EFI_TIMEOUT) {
             EfiFatal("HvEfi: AP devirtualize StartupAllAPs failed: %r\n", st);
         }

@@ -1,0 +1,90 @@
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
+[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[+] Step 5: Ticket read from the mailbox
+[+] Step 6: Session keys derived
+[+] Step 7: Decoy pages allocated
+[VMX] EPT: 32 RAM ranges (shared with host map)
+[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD5B401E, 3 splits
+[+] Step 8: VMX initialized (4 CPUs, EPT ready)
+[+]   EFI image: 62 pages at 0xD5A1000 (executable hide)
+[+] Step 9: 1076 pages to hide
+[+] Step 10: EPT hiding complete
+[+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
+[VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
+[VMEXIT] c[pVuM=E0X IrTe]a scopnu==110  rreiaps=o0nx=F3A1B Cr1i3pE=0
+xFB4D4BC
+[VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
+[[VVMMEEXXIITT]]  ccppuu==02  rreeaassoonn==3321  rriipp==00xxFFBB44CD34BB2C
+
+[[V+M]E XSItTe]p  c1p2u:= 3A lrle a4s oCnP=U3s1  vriirpt=u0axlFiBz4eDd4B
+C[
++] Step 13: Secrets wiped from g_Hv
+
+[HvEfi] VMX hypervisor active. OS will boot under virtualization.
+
+[HvReceipt] CORE stage=13
+[HvReceipt] CORE detail=0
+[HvReceipt] EPT units=1
+[HvReceipt] EPT ranges=32
+[HvReceipt] EPT maxphys_lo=1073741824
+[HvReceipt] EPT maxphys_hi=1
+[HvReceipt] EPT splits=3
+[HvReceipt] EPT gb=512
+[HvReceipt] VMCS pin=22
+[HvReceipt] VMCS proc=2483052922
+[HvReceipt] VMCS exit=4190203
+[HvReceipt] VMCS proc2=1052842
+[HvReceipt] EXITS total=12
+[HvReceipt] FULL DONE
+[HvReceipt] BOOT DONE
+
+[HvBoot] Probing hypervisor via authenticated VMCALL...
+[HvBoot] Calculated BootMagic: 0xF869878B883CC167
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x14C16824EDA77A6B
+[HvReceipt] VMCALL DETECT SUCCESS
+[+] [HvBoot] Session Derived! SessionMagic = 0xE36BC9DAF507FD03
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] Hypervisor Status: 0x0000000000010004 (vCPUs: 4, Running: 1)
+[HvReceipt] VMCALL STATUS vcpus=4
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
+
+[HvReceipt] VMCALL SELFTEST PASS
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WARN slot LoadImage st=800000000000000E
+[HvBoot] ChainloadWindows: found 2 filesystem handles
+[HvBoot] Found Windows on filesystem 0! Loading image...
+[HvReceipt] CHAIN WIN fs start
+[HvBoot] Launching Windows Boot Manager...
+[VMEXIT] cpu=0 reason=55 rip=0x1028720D
+[VMEXIT] cpu=0 reason=55 rip=0x10287255
+[VMEXIT] cpu=0 reason=55 rip=0xB79715
+[HvReceipt] HB 0 x=317 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB mod base=FABA000 size=4000 rva=213E name=-
+[HvReceipt] HB code a=FABC116 r=40 4883EC2089D2E8ABF9FFFFC9C3554889E54883EC20E8A6F9FFFF66C1E80983E001C9C35389C850520FA24D85C9740341890959E30289014C89C1E3028919488B4C2438E3028911585BC35389C889D150
+[HvReceipt] HB 1 x=484 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB 2 x=508 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] BOOT EBS
+[[V[VVMMEMEXEIXXTII]TT] ] c ccpppuu==u2 =1r3e a rseroeanass=3oo nn=r=3i3 p rri=ipp0==00xxFxFBFB4B4D4D4D47741171
+
+
+[VMEXIT] cpu=1 reason=4 rip=0xFB4D471
+[VMEXIT] cpu=1 reason=28 rip=0x66F
+[VMEXIT] cpu=1 reason=28 rip=0x26FB

@@ -13,6 +13,8 @@
 
 # Logs & temporary test files
 *.log
+!receipts/
+!receipts/*.log
 *.png
 hvticket
 build_manifest.txt

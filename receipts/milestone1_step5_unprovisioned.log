@@ -1,0 +1,31 @@
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT WARN no ticket
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
+[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[FATAL] EFI binary not provisioned — run launcher --provision --efi first
+[HvReceipt] CORE stage=32773
+[HvReceipt] CORE detail=0
+[HvReceipt] BOOT FAIL StartImage st=800000000000001A
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WARN slot LoadImage st=800000000000000E
+[HvBoot] ChainloadWindows: found 2 filesystem handles
+[HvBoot] Found Windows on filesystem 0! Loading image...
+[HvReceipt] CHAIN WIN fs start
+[HvBoot] Launching Windows Boot Manager...
+[HvReceipt] HB 0 x=0 d=0 v=0 L=
+[HvReceipt] HB 1 x=0 d=0 v=0 L=
+[HvReceipt] HB 2 x=0 d=0 v=0 L=
+[HvReceipt] BOOT EBS
