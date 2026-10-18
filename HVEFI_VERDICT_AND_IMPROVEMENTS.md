@@ -330,6 +330,23 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
   4. **Driver Disconnect & Reconnect**: `HvBootConnectAll()` successfully bound controllers across the internal NVMe bus.
   5. **Native Windows Chainload**: Windows Boot Manager (`bootmgfw.efi`) was located on the internal NVMe filesystem, loaded, and started (`HVEFI CHAIN WIN fs start`), passing heartbeats (`HB 0`, `HB 1`) before successfully booting into the Windows 11 desktop.
 
+### 5.2. B1 Bare-Metal Hardware Execution Evidence: Self-Disarm Rescue (Dell G15 5530)
+* **Primary Evidence File**: `receipts/dell_baremetal_b1_receipt.log`
+* **Test Timestamp**: October 19, 2026, 03:15:40 AM (Host Firmware Clock)
+* **Execution Environment**: Physical Dell G15 5530, Intel Core i5-13450HX, InsydeH2O BIOS 1.35.0, booted via USB UEFI.
+* **Test Conditions**: Seeded "hung boot" state before reboot:
+  * `hvcfg` set to `F` (requesting full mode)
+  * `hvefi.log` seeded with `HVEFI FULL START` (simulating an uncompleted prior attempt)
+* **Hardware Results & Proofs**:
+  1. **Disarm Rewrite (`hvcfg` $\rightarrow$ `'S'`)**:
+     Upon booting, `HvBoot.efi` detected the uncompleted attempt, overrode the request, and rewrote `hvcfg` from `'F'` to `'S'` directly on the FAT32 volume. Post-boot verification in Windows confirmed `hvcfg` reads `'S'`.
+  2. **Receipt Verification**:
+     `hvefi.log` recorded `HVEFI ENTRY SAFE prev=1`, confirming that the autonomous rescue logic fired.
+  3. **Clean Stand-Down**:
+     `hvcore.efi` obeyed `HV_MAILBOX_FLAG_FORCE_SAFE | HV_MAILBOX_FLAG_RESCUED`, reported `stage=14`, and returned `EFI_ABORTED`.
+  4. **Smooth Windows Boot**:
+     Windows Boot Manager took over immediately, recording heartbeats `HB 0`, `HB 1`, and `HB 2` before launching Windows 11 without delay or freeze.
+
 ---
 
 ## 6. Next Steps for Production Hardening
