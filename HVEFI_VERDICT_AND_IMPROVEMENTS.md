@@ -114,23 +114,96 @@ The hypervisor core entry point (`HvEfiDriverEntry` in `hv_efi_main.c`) executes
 
 ---
 
-## 4. Verification and Telemetry Sources
+---
 
-In `HvEfi`, execution state is tracked via deterministic hardware and filesystem telemetry rather than unverified assertions:
+## 4. Verification Traces and Telemetry Evidence
 
+In `HvEfi`, execution state is tracked via deterministic hardware serial output, receipt files, and shared memory mailboxes:
+
+### 4.1. Milestone 1 Verified Trace: Unprovisioned Differential ("CHAIN OK TO STEP 5")
+Run in VMware nested VT-x with unprovisioned binary (`hvcfg` = `'F'`, no ticket). Proves `HvBoot` -> `mailbox` -> `hvcore` -> Steps 1–4 pass, cleanly halting at Step 5 with designed `EFI_SECURITY_VIOLATION` (`0x8005`), while verifying that the VMCALL probe is safely bypassed without triggering `#UD`:
+
+```text
+[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[FATAL] EFI binary not provisioned — run launcher --provision --efi first
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvBoot] ChainloadWindows: found 2 filesystem handles
+[HvBoot] Found Windows on filesystem 0! Loading image...
+[HvBoot] Launching Windows Boot Manager...
+```
+
+### 4.2. Milestone 2 Verified Trace: Full Provisioned Bring-Up (Steps 1 to 13 + In-Band VMCALL Probe)
+Run in VMware nested VT-x with provisioned binary (`hvcore.efi` + `HvBoot_patched.efi` + ticket). Proves all 13 steps complete, all 4 vCPUs virtualized, EPT 1075 pages cloaked, authenticated VMCALL detection probe succeeds in non-root mode, and Windows 11 chainloads under virtualization:
+
+```text
+[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[+] Step 5: Ticket read from the mailbox
+[+] Step 6: Session keys derived
+[+] Step 7: Decoy pages allocated
+[VMX] EPT: 34 RAM ranges (shared with host map)
+[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD5B201E, 3 splits
+[+] Step 8: VMX initialized (4 CPUs, EPT ready)
+[+]   EFI image: 62 pages at 0xD59F000 (executable hide)
+[+] Step 9: 1075 pages to hide
+[+] Step 10: EPT hiding complete
+[+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
+[VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
+[VMEXIT] cpu=1 reason=31 rip=0xFB4D4BC
+[VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=0 reason=10 rip=0xFABC13E
+[VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
+[VMEXIT] cpu=2 reason=31 rip=0xFB4D4BC
+[+] Step 12: All 4 CPUs virtualized
+[+] Step 13: Secrets wiped from g_Hv
+
+[HvEfi] VMX hypervisor active. OS will boot under virtualization.
+
+[HvBoot] Probing hypervisor via authenticated VMCALL...
+[HvBoot] Calculated BootMagic: 0xF869878B883CC167
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x5B191B4166B656C7
+[+] [HvBoot] Session Derived! SessionMagic = 0x6645B65C399D99E9
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] Hypervisor Status: 0x0000000000010004 (vCPUs: 4, Running: 0)
+[VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
+[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
+
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvBoot] ChainloadWindows: found 2 filesystem handles
+[HvBoot] Found Windows on filesystem 0! Loading image...
+[HvBoot] Launching Windows Boot Manager...
+[VMEXIT] cpu=0 reason=55 rip=0x1028720D
+[VMEXIT] cpu=0 reason=55 rip=0x10287255
+[VMEXIT] cpu=0 reason=55 rip=0xB79715
+[VMEXIT] cpu=1 reason=3  rip=0xFB4D471
+[VMEXIT] cpu=2 reason=3  rip=0xFB4D471
+[VMEXIT] cpu=3 reason=3  rip=0xFB4D471
+[VMEXIT] cpu=1 reason=4  rip=0xFB4D471
+[VMEXIT] cpu=1 reason=28 rip=0x66F
+[VMEXIT] cpu=1 reason=28 rip=0x26FB
+```
+
+### 4.3. Telemetry Mechanisms
 1. **Receipt File (`\EFI\Boot\hvefi.log`)**:
-   Written directly to the ESP via `SimpleFileSystem` protocol. Expected tokens:
-   - `ENTRY FULL`: `HvBoot.efi` started full bring-up attempt.
-   - `FULL START`: Driver loaded; `StartImage` invoked.
-   - `FULL DONE` / `BOOT DONE`: Hypervisor driver returned `EFI_SUCCESS` and is resident.
-   - `VMCALL DETECT SUCCESS`: Non-root guest probe completed authenticated handshake.
-   - `VMCALL STATUS vcpus <N>`: Non-root guest verified active vCPU count.
-   - `VMCALL SELFTEST PASS`: Hypervisor validated cryptographic session key.
-   - `BOOT SAFE stood-down`: Clean refusal/safe-mode path taken.
+   Written directly to the ESP via `SimpleFileSystem` protocol.
 2. **I/O Port POST Codes (`HvPost()`)**:
    Outputs diagnostic bytes to port `0x80` during early initialization before serial or filesystem output is available.
 3. **Shared Mailbox (`HV_MAILBOX`)**:
    Maintains runtime counters: `HypercallCount`, `LastHypercallId`, `LastHypercallStatus`, and `Flags` (`HV_MAILBOX_FLAG_EBS_OK` set at `ExitBootServices`).
+
 
 ---
 
