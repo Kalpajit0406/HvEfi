@@ -673,7 +673,7 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
                 ApVirtualizeCallback,
                 h,                              // ProcessorNumber
                 NULL,                           // WaitEvent (blocking)
-                5000000,                        // 5 s timeout per AP
+                2000000,                        // 2 s timeout per AP (30 s budget across 15 APs vs 120 s watchdog)
                 (PVOID)(UINTN)(h + 1),          // handle encoded as h+1
                 NULL                            // Finished
             );

@@ -63,6 +63,6 @@
   DebugLib
 
 [BuildOptions]
-  # Match HvEfi: intrinsics on, security cookie off (no CRT), strict preprocessor.
-  MSFT:*_*_X64_CC_FLAGS = /O2 /GS- /Oi /wd4201 /Zc:preprocessor
+  # Match HvEfi: intrinsics on, security cookie off (no CRT), strict preprocessor, LTCG off.
+  MSFT:*_*_X64_CC_FLAGS = /O2 /GS- /Oi /wd4201 /Zc:preprocessor /GL-
   MSFT:*_*_X64_DLINK_FLAGS = /PDBALTPATH:HvBoot.pdb
