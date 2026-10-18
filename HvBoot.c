@@ -95,6 +95,7 @@
 // cannot disagree about either.
 #include "hv_efi_bootcfg.h"
 #include "shared/hv_siphash.h"
+#include "shared/hv_status.h"
 
 // Path on the ESP where the launcher's --install-core writes the hypervisor
 // core. Separate from the Boot#### slot's own file path (which points at
@@ -1835,8 +1836,16 @@ HvBootMain (
 
   // =========================================================================
   // Authenticated VMCALL Detection Probe (Guest Non-Root Verification)
+  //
+  // CRITICAL: Gate this probe strictly on (st == EFI_SUCCESS).
+  // If the hypervisor is NOT resident — due to safe-mode stand-down
+  // (startSt == EFI_ABORTED), configuration absence, or bring-up failure —
+  // executing VMCALL in bare UEFI mode immediately raises #UD (undefined opcode)
+  // which hangs/faults the firmware before Windows chainload can execute.
+  // The mailbox check alone is insufficient because HvBootMain allocates and
+  // validates the mailbox early in both safe and normal modes.
   // =========================================================================
-  {
+  if (st == EFI_SUCCESS) {
     static const UINT8 VmcallCode[] = {
         0x4C, 0x8B, 0x54, 0x24, 0x28,  // mov r10, [rsp+28h]
         0x4C, 0x8B, 0x5C, 0x24, 0x30,  // mov r11, [rsp+30h]
@@ -1856,7 +1865,9 @@ HvBootMain (
       DEBUG ((DEBUG_INFO, "[HvBoot] Calculated BootMagic: 0x%016lx\n", bootMagic));
 
       UINT64 nonce = VmcallFn (bootMagic, 0 /* HV_HYPERCALL_DETECT */, 0, 0, 0, 0);
-      if (nonce != 0 && nonce != (UINT64)-1 && nonce != 0xFFFFFFFFFFFFFFFFULL) {
+      // Valid nonce contract: must not be 0, (UINT64)-1, HV_STATUS_NOT_OURS ((UINT64)-2), and must be > 0xFF.
+      // (See shared/hv_auth.h HvSanitizeNonce and shared/hv_status.h).
+      if (nonce > 0xFF && nonce != (UINT64)-1 && nonce != (UINT64)-2 && nonce != HV_STATUS_NOT_OURS) {
         DEBUG ((DEBUG_INFO, "[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x%016lx\n", nonce));
         HvBootReceiptLine (vol, "VMCALL DETECT SUCCESS");
 
@@ -1885,12 +1896,20 @@ HvBootMain (
           HvBootReceiptLine (vol, "VMCALL SELFTEST PASS");
         } else {
           DEBUG ((DEBUG_INFO, "[-] [HvBoot] HV_HYPERCALL_SELFTEST: FAILED (0x%lx)\n\n", selftest));
+          HvBootReceiptStatus (vol, "VMCALL SELFTEST FAIL", (EFI_STATUS)selftest);
         }
       } else {
-        DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED (ret = 0x%016lx)\n", nonce));
+        if (nonce == (UINT64)-2 || nonce == HV_STATUS_NOT_OURS) {
+          DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED: NOT_OURS (ticket mismatch or unauthenticated)\n"));
+          HvBootReceiptLine (vol, "VMCALL DETECT FAIL NOT_OURS");
+        } else {
+          DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED (ret = 0x%016lx)\n", nonce));
+          HvBootReceiptStatus (vol, "VMCALL DETECT FAIL", (EFI_STATUS)nonce);
+        }
       }
     }
   }
+
 
   // Chainload Windows Boot Manager directly instead of returning error to BDS.
   // On Dell / OEM UEFI firmwares, returning an error to BDS causes Dell firmware

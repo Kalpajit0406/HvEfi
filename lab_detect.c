@@ -6,6 +6,7 @@
 #include <intrin.h>
 
 #include "shared/hv_siphash.h"
+#include "shared/hv_status.h"
 
 #define HV_HYPERCALL_DETECT             0x0000
 #define HV_HYPERCALL_READ_PHYS          0x0001
@@ -17,8 +18,6 @@
 #define HV_HYPERCALL_INVALIDATE_EPT     0x0007
 #define HV_HYPERCALL_SELFTEST           0x0008
 
-#define HV_STATUS_SUCCESS               0x0000000000000000ULL
-#define HV_STATUS_NOT_OURS              0xFFFFFFFFFFFFFFFFULL
 #define HV_STATUS_CPU_MASK              0x000000000000FFFFULL
 #define HV_STATUS_RUNNING_BIT           (1ULL << 63)
 
@@ -110,14 +109,17 @@ int main(int argc, char **argv) {
         Sleep(2);
         uint64_t res = RawVmcall(bootMagic, HV_HYPERCALL_DETECT, 0, 0, 0, 0);
         if (res == (uint64_t)-1) {
-            LOG("    [CPU %02u] VMCALL faulted with #UD (Bare metal / Not virtualized)\n", i);
-        } else if (res == HV_STATUS_NOT_OURS) {
-            LOG("    [CPU %02u] VMCALL returned NOT_OURS (Ticket mismatch or dark mode)\n", i);
+            LOG("    [CPU %02u] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)\n", i);
+        } else if (res == (uint64_t)-2 || res == HV_STATUS_NOT_OURS) {
+            LOG("    [CPU %02u] VMCALL returned NOT_OURS (-2) (Ticket mismatch or dark mode)\n", i);
+        } else if (res <= 0xFF) {
+            LOG("    [CPU %02u] VMCALL returned invalid response (0x%016llX)\n", i, res);
         } else {
             activeVmcall++;
             detectedNonce = res;
             LOG("    [CPU %02u] VMCALL DETECT SUCCESS! Nonce = 0x%016llX\n", i, res);
         }
+
     }
     SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)-1);
 
