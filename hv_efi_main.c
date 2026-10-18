@@ -58,6 +58,7 @@
 EFI_BOOT_SERVICES        *gEfiBS = NULL;
 EFI_RUNTIME_SERVICES     *gEfiRT = NULL;
 EFI_MP_SERVICES_PROTOCOL *gEfiMp = NULL;
+volatile LONG            g_DebugPrintLock = 0;
 
 // Patchable EFI variable name. Initialized with a sentinel pattern so the
 // static string "HvDrvTicket" never appears in the binary. InstallEfiBinary()

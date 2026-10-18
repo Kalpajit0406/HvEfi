@@ -40,12 +40,35 @@ extern EFI_MP_SERVICES_PROTOCOL  *gEfiMp;
 
 // ── Debug output (available before ExitBootServices) ───────────────────────
 
-// Guarded so hvdefs.h (included just below) can carry its own definition for
-// the non-EDK2 type-check builds without redefining these here.
-#ifndef EfiPrint
-#define EfiPrint(fmt, ...)  DEBUG((DEBUG_INFO, fmt, ##__VA_ARGS__))
-#define EfiFatal(fmt, ...)  DEBUG((DEBUG_ERROR, "[FATAL] " fmt, ##__VA_ARGS__))
-#endif
+extern volatile LONG g_DebugPrintLock;
+
+static __inline VOID HvAcquireDebugLock(VOID) {
+  UINT32 spin = 0;
+  while (_InterlockedCompareExchange(&g_DebugPrintLock, 1, 0) != 0) {
+    _mm_pause();
+    if (++spin > 100000) break; // bounded: never deadlock on faults or NMIs
+  }
+}
+
+static __inline VOID HvReleaseDebugLock(VOID) {
+  _InterlockedExchange(&g_DebugPrintLock, 0);
+}
+
+#undef EfiPrint
+#define EfiPrint(fmt, ...) \
+  do { \
+    HvAcquireDebugLock(); \
+    DEBUG((DEBUG_INFO, fmt, ##__VA_ARGS__)); \
+    HvReleaseDebugLock(); \
+  } while (0)
+
+#undef EfiFatal
+#define EfiFatal(fmt, ...) \
+  do { \
+    HvAcquireDebugLock(); \
+    DEBUG((DEBUG_ERROR, "[FATAL] " fmt, ##__VA_ARGS__)); \
+    HvReleaseDebugLock(); \
+  } while (0)
 
 // HV_LOG is the WDK tree's debug-print macro (HvDrv/hvdefs.h); the EFI tree
 // never defined it, so the two uses in hv_efi_smp.c had no definition under

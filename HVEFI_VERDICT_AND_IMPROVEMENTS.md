@@ -97,10 +97,18 @@ During recent bring-up iterations, five critical architectural and implementatio
   ```
   `HvBoot.c` previously decoded the Running bit as `(status >> 63) & 1` and `lab_detect.c` defined `HV_STATUS_RUNNING_BIT` as `(1ULL << 63)`. Consequently, even on successful bring-up where status was `0x0000000000010004` (bit 16 set, 4 vCPUs), both tools logged `Running: 0`. Additionally, receipt lines written by `HvBootReceiptLine()` were dropped on read-only ISO/CD-ROM test boots where filesystem writes fail.
 * **Resolution**:
-  1. Updated `HvBoot.c` to decode `(UINT32)((status >> 16) & 1)`, correctly reporting `Running: 1`.
-  2. Updated `lab_detect.c` to define `HV_STATUS_RUNNING_BIT (1ULL << 16)`.
+  1. Updated `HvBoot.c` to decode using the wire contract constants: `(UINT32)((status & HV_STATUS_RUNNING_BIT) ? 1 : 0)` and `(UINT32)(status & HV_STATUS_CPU_MASK)`.
+  2. Centralized `HV_STATUS_CPU_MASK` and `HV_STATUS_RUNNING_BIT` in `shared/hv_status.h` so all modules (`HvBoot.c`, `lab_detect.c`, `hvdefs.h`) consume a single wire definition without magic number literals.
   3. Added live serial mirroring to `HvBootReceiptLine()` (`DEBUG ((DEBUG_INFO, "[HvReceipt] %a\n", Message))`), ensuring all receipt markers are captured on the virtual/hardware serial port.
   4. Tightened devirtualize AP timeout in `hv_efi_smp.c` from 5 s to 2 s (`2000000` µs) to prevent exceeding the firmware watchdog on multi-core systems, and aligned stale comment references.
+
+### Defect 7: Multi-Core Serial Port Contention & Bounded Debug Lock
+* **Location**: `hv_efi.h:43-74` and `hv_efi_main.c:61`
+* **Vulnerability**: EDK2's `BaseDebugLibSerialPort` does not synchronize character transmission to the 16550 UART hardware. When the BSP completes Step 12 and launches APs, concurrent VM-exits on APs interleaved characters with BSP messages, causing character-level mangling and tearing the `[+] Step 12: All 4 CPUs virtualized` line.
+* **Resolution**:
+  1. Implemented a bounded spinlock (`g_DebugPrintLock`, `HvAcquireDebugLock()`, `HvReleaseDebugLock()`) wrapping `DEBUG` in `EfiPrint` and `EfiFatal`.
+  2. The spinlock uses `_mm_pause()` with a bound of 100,000 iterations, ensuring that any AP fault or exception will never deadlock other cores.
+  3. Formally designated the ESP receipt file (`\EFI\Boot\hvefi.log`) as the primary, authoritative, deterministic receipt oracle, with the serial stream serving as secondary live telemetry.
 
 ---
 
@@ -146,13 +154,13 @@ Execution state is tracked via deterministic hardware serial output (`hvserial.l
 [HvReceipt] BOOT PATH file
 [HvReceipt] BOOT START
 
-[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[HvEfi] EFI DXE VMX Hypervisor - starting (full mode)
 [+] Step 1: VMX supported
 [+] Step 2: MP Services located
 [VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
 [+] Step 3: Host page tables built
 [+] Step 4: Nonce generated
-[FATAL] EFI binary not provisioned — run launcher --provision --efi first
+[FATAL] EFI binary not provisioned - run launcher --provision --efi first
 [HvReceipt] CORE stage=32773
 [HvReceipt] CORE detail=0
 [HvReceipt] BOOT FAIL StartImage st=800000000000001A
@@ -175,7 +183,7 @@ Execution state is tracked via deterministic hardware serial output (`hvserial.l
 * **Primary Evidence File**: `receipts/milestone2_full_bringup_running1.log`
 * **Test Environment**: VMware Workstation 17.6.2 (Nested VT-x), 4 vCPUs, Windows 11 Enterprise x64 guest.
 * **Test Configuration**: Sentinel-patched binaries (`hvcore.efi` + `HvBoot_patched.efi` + 32-byte `hvticket`).
-* **Outcome**: All 13 steps execute cleanly. All 4 vCPUs are virtualized. EPT identity maps 512 GB with 1076 pages cloaked. The in-band VMCALL probe executes in non-root mode, proves hypervisor status `0x0000000000010004` (`vCPUs: 4, Running: 1`), passes selftest authentication, chainloads Windows Boot Manager, handles VM-exits (CR4/XSETBV Reason 55), records heartbeats, and smoothly executes through `BOOT EBS` into Windows 11:
+* **Outcome**: All 13 steps execute cleanly. All 4 vCPUs are virtualized without serial interleaving. EPT identity maps 512 GB with 1076 pages cloaked. The in-band VMCALL probe executes in non-root mode, proves hypervisor status `0x0000000000010004` (`vCPUs: 4, Running: 1`), passes selftest authentication, chainloads Windows Boot Manager, handles VM-exits (CR4/XSETBV Reason 55), records heartbeats, and smoothly executes through `BOOT EBS` into Windows 11:
 
 ```text
 [HvReceipt] BOOT HIT
@@ -185,7 +193,7 @@ Execution state is tracked via deterministic hardware serial output (`hvserial.l
 [HvReceipt] BOOT PATH file
 [HvReceipt] BOOT START
 
-[HvEfi] EFI DXE VMX Hypervisor — starting (full mode)
+[HvEfi] EFI DXE VMX Hypervisor - starting (full mode)
 [+] Step 1: VMX supported
 [+] Step 2: MP Services located
 [VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
@@ -194,31 +202,31 @@ Execution state is tracked via deterministic hardware serial output (`hvserial.l
 [+] Step 5: Ticket read from the mailbox
 [+] Step 6: Session keys derived
 [+] Step 7: Decoy pages allocated
-[VMX] EPT: 32 RAM ranges (shared with host map)
+[VMX] EPT: 36 RAM ranges (shared with host map)
 [VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD5B401E, 3 splits
 [+] Step 8: VMX initialized (4 CPUs, EPT ready)
-[+]   EFI image: 62 pages at 0xD5A1000 (executable hide)
+[+]   EFI image: 64 pages at 0xD59F000 (executable hide)
 [+] Step 9: 1076 pages to hide
 [+] Step 10: EPT hiding complete
 [+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
 [VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
 [VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
-[VMEXIT] c[pVuM=E0X IrTe]a scopnu==110  rreiaps=o0nx=F3A1B Cr1i3pE=0
-xFB4D4BC
 [VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=1 reason=31 rip=0xFB4D4BC
 [VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
-[[VVMMEEXXIITT]]  ccppuu==02  rreeaassoonn==3321  rriipp==00xxFFBB44CD34BB2C
-
-[[V+M]E XSItTe]p  c1p2u:= 3A lrle a4s oCnP=U3s1  vriirpt=u0axlFiBz4eDd4B
-C[
-+] Step 13: Secrets wiped from g_Hv
+[VMEXIT] cpu=0 reason=10 rip=0xFB4C3F0
+[VMEXIT] cpu=2 reason=31 rip=0xFB4D4BC
+[VMEXIT] cpu=0 reason=32 rip=0xFB4C3B2
+[VMEXIT] cpu=3 reason=31 rip=0xFB4D4BC
+[+] Step 12: All 4 CPUs virtualized
+[+] Step 13: Secrets wiped from g_Hv
 
 [HvEfi] VMX hypervisor active. OS will boot under virtualization.
 
 [HvReceipt] CORE stage=13
 [HvReceipt] CORE detail=0
 [HvReceipt] EPT units=1
-[HvReceipt] EPT ranges=32
+[HvReceipt] EPT ranges=36
 [HvReceipt] EPT maxphys_lo=1073741824
 [HvReceipt] EPT maxphys_hi=1
 [HvReceipt] EPT splits=3
@@ -227,16 +235,16 @@ C[
 [HvReceipt] VMCS proc=2483052922
 [HvReceipt] VMCS exit=4190203
 [HvReceipt] VMCS proc2=1052842
-[HvReceipt] EXITS total=12
+[HvReceipt] EXITS total=11
 [HvReceipt] FULL DONE
 [HvReceipt] BOOT DONE
 
 [HvBoot] Probing hypervisor via authenticated VMCALL...
 [HvBoot] Calculated BootMagic: 0xF869878B883CC167
 [VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
-[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x14C16824EDA77A6B
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x2DADFC1143F142E7
 [HvReceipt] VMCALL DETECT SUCCESS
-[+] [HvBoot] Session Derived! SessionMagic = 0xE36BC9DAF507FD03
+[+] [HvBoot] Session Derived! SessionMagic = 0x0A6ADEFD890A0B40
 [VMEXIT] cpu=0 reason=18 rip=0xD5E61FA
 [+] [HvBoot] Hypervisor Status: 0x0000000000010004 (vCPUs: 4, Running: 1)
 [HvReceipt] VMCALL STATUS vcpus=4
@@ -256,19 +264,20 @@ C[
 [VMEXIT] cpu=0 reason=55 rip=0x1028720D
 [VMEXIT] cpu=0 reason=55 rip=0x10287255
 [VMEXIT] cpu=0 reason=55 rip=0xB79715
-[HvReceipt] HB 0 x=317 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB 0 x=317 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/DDF1C9 
 [HvReceipt] HB mod base=FABA000 size=4000 rva=213E name=-
 [HvReceipt] HB code a=FABC116 r=40 4883EC2089D2E8ABF9FFFFC9C3554889E54883EC20E8A6F9FFFF66C1E80983E001C9C35389C850520FA24D85C9740341890959E30289014C89C1E3028919488B4C2438E3028911585BC35389C889D150
-[HvReceipt] HB 1 x=484 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
-[HvReceipt] HB 2 x=508 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB 1 x=482 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
+[HvReceipt] HB 2 x=506 d=0 v=0 L=10/0/FABC13E 10/0/FABC13E 10/0/FABC13E 
 [HvReceipt] BOOT EBS
-[[V[VVMMEMEXEIXXTII]TT] ] c ccpppuu==u2 =1r3e a rseroeanass=3oo nn=r=3i3 p rri=ipp0==00xxFxFBFB4B4D4D4D47741171
-
-
+[VMEXIT] cpu=1 reason=3 rip=0xFB4D471
+[VMEXIT] cpu=2 reason=3 rip=0xFB4D471
+[VMEXIT] cpu=3 reason=3 rip=0xFB4D471
 [VMEXIT] cpu=1 reason=4 rip=0xFB4D471
 [VMEXIT] cpu=1 reason=28 rip=0x66F
 [VMEXIT] cpu=1 reason=28 rip=0x26FB
 ```
+
 
 ---
 

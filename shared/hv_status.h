@@ -35,4 +35,13 @@
 // interface — it is what the handler sees, not what a guest is told.
 #define HV_STATUS_NOT_OURS              ((UINT64)-2)
 
+// Wire status word format (returned by hypercall 6)
+#ifndef HV_STATUS_CPU_MASK
+#define HV_STATUS_CPU_MASK              0xFFFFULL
+#endif
+
+#ifndef HV_STATUS_RUNNING_BIT
+#define HV_STATUS_RUNNING_BIT           (1ULL << 16)
+#endif
+
 #endif // HV_STATUS_H

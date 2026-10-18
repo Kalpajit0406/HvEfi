@@ -1887,8 +1887,8 @@ HvBootMain (
         UINT64 mac = HvMacTuple (key0, key1, words);
         UINT64 status = VmcallFn (sessionMagic, 6, 0, 0, mac, 0);
         DEBUG ((DEBUG_INFO, "[+] [HvBoot] Hypervisor Status: 0x%016lx (vCPUs: %u, Running: %u)\n",
-                status, (UINT32)(status & 0xFFFF), (UINT32)((status >> 16) & 1)));
-        HvBootReceiptNum (vol, "VMCALL STATUS vcpus", (UINT32)(status & 0xFFFF));
+                status, (UINT32)(status & HV_STATUS_CPU_MASK), (UINT32)((status & HV_STATUS_RUNNING_BIT) ? 1 : 0)));
+        HvBootReceiptNum (vol, "VMCALL STATUS vcpus", (UINT32)(status & HV_STATUS_CPU_MASK));
 
         // Selftest
         seq++;

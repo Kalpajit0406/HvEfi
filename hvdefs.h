@@ -831,8 +831,12 @@ typedef struct {
 #define INVVPID_ALL_CONTEXTS                  2
 #define INVVPID_SINGLE_CONTEXT_RETAIN_GLOBALS 3
 
+#ifndef HV_STATUS_CPU_MASK
 #define HV_STATUS_CPU_MASK              0xFFFFULL
+#endif
+#ifndef HV_STATUS_RUNNING_BIT
 #define HV_STATUS_RUNNING_BIT           (1ULL << 16)
+#endif
 #define HV_STATUS_DARK_REASON_SHIFT     17
 #define HV_STATUS_TSC_SHIFT             32
 
