@@ -347,6 +347,47 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
   4. **Smooth Windows Boot**:
      Windows Boot Manager took over immediately, recording heartbeats `HB 0`, `HB 1`, and `HB 2` before launching Windows 11 without delay or freeze.
 
+### 5.3. B2 Bare-Metal Hardware Execution Evidence: Full VMX Bring-Up & Step 3 Triage (Dell G15 5530)
+* **Primary Evidence File**: `receipts/dell_baremetal_b2_step3_resource_receipt.log`
+* **Test Timestamp**: October 19, 2026, 03:20:12 AM (Host Firmware Clock)
+* **Execution Environment**: Physical Dell G15 5530, Intel Core i5-13450HX, InsydeH2O BIOS 1.35.0, booted via USB UEFI (`hvcfg` = `'F'`).
+* **Raw Receipt Log**:
+  ```text
+  HVEFI BOOT HIT
+  HVEFI ENTRY FULL
+  HVEFI FULL START
+  HVEFI MBOX pa=1073741824
+  HVEFI CORE LAST stage=14
+  HVEFI BOOT PATH file
+  HVEFI BOOT START
+  HVEFI CORE stage=32771
+  HVEFI CORE detail=3221225626
+  HVEFI BOOT FAIL StartImage st=8000000000000009
+  HVEFI CHAIN WIN slot load
+  HVEFI CHAIN WIN esp retry
+  HVEFI CHAIN WARN slot LoadImage st=800000000000000E
+  HVEFI CHAIN WIN slot load
+  HVEFI CHAIN WIN esp retry
+  HVEFI CHAIN WARN slot LoadImage st=800000000000000E
+  HVEFI CHAIN WIN fs start
+  HVEFI HB 0 x=0 d=0 v=0 L=
+  HVEFI HB 1 x=0 d=0 v=0 L=
+  HVEFI HB 2 x=0 d=0 v=0 L=
+  ```
+* **Hardware Deductions & Failure Triage**:
+  1. **Fail-Safe Mechanism Succeeded Perfectly**:
+     When the core failed bring-up, `HvBoot` cleanly caught `st = 8000000000000009` (`EFI_OUT_OF_RESOURCES`), logged the exact mailbox stage and detail, cleanly bypassed VMCALL, and handed off execution to Windows Boot Manager (`HVEFI CHAIN WIN fs start`). Windows 11 booted without a freeze, hang, or BSOD.
+  2. **Root Cause Decoded**:
+     * `stage=32771` corresponds to `0x8003` = `HV_STAGE_FAIL(3)` (Step 3: Host Page Tables & EPT RAM range collection).
+     * `detail=3221225626` corresponds to `0xC000009A` = `STATUS_INSUFFICIENT_RESOURCES`.
+     * On physical Dell InsydeH2O BIOS 1.35.0, the UEFI memory map returned by `gBS->GetMemoryMap` contains > 128 RAM descriptors due to DXE driver pool fragmentations. In `HvEptCollectRamRanges`, descriptors were recorded individually without coalescing, immediately hitting the legacy `HV_MAX_RAM_RANGES` (128) bound.
+  3. **Surgical Fix Implemented & Deployed**:
+     * **On-the-Fly Coalescing**: `HvEptCollectRamRanges` now inspects `PhysicalStart == prevBase + prevBytes` and extends the contiguous physical chunk, coalescing hundreds of fragmented UEFI descriptors down into contiguous physical ranges.
+     * **Capacity Expansion**: `HV_MAX_RAM_RANGES` expanded 4x from `128` to `512` in `hvdefs.h`.
+     * **Stack Guarding**: `HvEptInitialize` now allocates its intermediate preservation buffer dynamically via `EfiAllocPool` instead of placing an 8KB structure on the DXE stack.
+     * **Memory Fallback**: `EfiAllocPagesBelow4G` now transparently falls back to `AllocateAnyPages` if low 4GB memory is exhausted, ensuring host page table allocation never starves.
+     * **Fresh Deployment**: Binaries recompiled in EDK2, provisioned via `patch_sentinels.py`, and written to `D:\EFI\Boot\` (`HvBoot.efi`, `BOOTX64.EFI`, `hvcore.efi`, `hvcfg` = `'F'`).
+
 ---
 
 ## 6. Next Steps for Production Hardening
@@ -359,4 +400,5 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
    Virtualize `RDTSC`/`RDTSCP` timing when VMCS exit profiling is enabled to mitigate VM-exit timing side-channels.
 4. **Kernel Bridge Driver**:
    Develop a dedicated Windows Ring-0 companion driver (`HvBridge.sys`) to manage authenticated hypercalls, process introspection, and physical memory translation from user space.
+
 

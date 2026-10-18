@@ -1070,7 +1070,7 @@ typedef struct _HV_UNLOAD_STATE {
 
 #define EPROCESS_TOKEN_OFFSET 0x4B8
 
-#define HV_MAX_RAM_RANGES   128
+#define HV_MAX_RAM_RANGES   512
 
 // Maximum 512GB PML4 units the EPT identity-maps. Unit 0 (the low 512GB) is
 // always mapped; further units cover RAM that reports above 512GB. Capped so a

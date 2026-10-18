@@ -299,7 +299,22 @@ NTSTATUS HvEptCollectRamRanges(PEPT_STATE ept) {
         }
 
         if (!isRam) continue;
+        if (desc->NumberOfPages == 0) continue;
+
+        // Merge contiguous adjacent descriptors on the fly to prevent fragmentation
+        if (ept->RamRangeCount > 0) {
+            UINT32 prev = ept->RamRangeCount - 1;
+            UINT64 prevBase = (UINT64)ept->RamRanges[prev].BaseAddress.QuadPart;
+            UINT64 prevBytes = (UINT64)ept->RamRanges[prev].NumberOfBytes.QuadPart;
+            if ((UINT64)desc->PhysicalStart == prevBase + prevBytes) {
+                ept->RamRanges[prev].NumberOfBytes.QuadPart +=
+                    (INT64)(desc->NumberOfPages * PAGE_SIZE);
+                continue;
+            }
+        }
+
         if (ept->RamRangeCount >= HV_MAX_RAM_RANGES) {
+            EfiFatal("[VMX] Memory map exceeded HV_MAX_RAM_RANGES (%u)\n", ept->RamRangeCount);
             EfiFreePool(mapBuf);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
@@ -325,19 +340,25 @@ NTSTATUS HvEptInitialize(PEPT_STATE ept) {
     // The RAM map is collected once, by HvBuildHostPageTables, and shared with
     // the host identity map so both cover exactly the same range. Preserve it
     // across the reset below; collect it here only if it is not present yet.
-    PHYSICAL_MEMORY_RANGE ranges[HV_MAX_RAM_RANGES];
+    PHYSICAL_MEMORY_RANGE *ranges = NULL;
     UINT32 rangeCount = ept->RamRangeCount;
     if (rangeCount > HV_MAX_RAM_RANGES) rangeCount = 0;   // corrupt → re-collect
-    if (rangeCount)
-        RtlCopyMemory(ranges, ept->RamRanges,
-                      (SIZE_T)rangeCount * sizeof(ranges[0]));
+    if (rangeCount) {
+        ranges = (PHYSICAL_MEMORY_RANGE *)EfiAllocPool((UINTN)rangeCount * sizeof(ranges[0]));
+        if (ranges) {
+            RtlCopyMemory(ranges, ept->RamRanges, (SIZE_T)rangeCount * sizeof(ranges[0]));
+        } else {
+            rangeCount = 0;
+        }
+    }
 
     RtlZeroMemory(ept, sizeof(EPT_STATE));
 
-    if (rangeCount) {
+    if (ranges) {
         RtlCopyMemory(ept->RamRanges, ranges,
                       (SIZE_T)rangeCount * sizeof(ranges[0]));
         ept->RamRangeCount = rangeCount;
+        EfiFreePool(ranges);
         // Defensive: the shared snapshot was normalised at collection, but the
         ept->NormRangeCount = EptNormalizeRamRanges(ept);
         EfiPrint("[VMX] EPT: %u RAM ranges (shared with host map)\n", rangeCount);

@@ -95,7 +95,16 @@ static inline PVOID EfiAllocPagesBelow4G(UINT32 pageCount) {
         pageCount,
         &pa
     );
-    if (EFI_ERROR(st)) return NULL;
+    if (EFI_ERROR(st)) {
+        pa = 0;
+        st = gEfiBS->AllocatePages(
+            AllocateAnyPages,
+            EfiRuntimeServicesData,
+            pageCount,
+            &pa
+        );
+        if (EFI_ERROR(st)) return NULL;
+    }
     ZeroMem((VOID *)(UINTN)pa, (UINTN)pageCount * PAGE_SIZE);
     return (PVOID)(UINTN)pa;
 }
