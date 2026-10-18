@@ -357,6 +357,7 @@ typedef INT32  LONG;    /* EDK2 has no LONG; NT LONG is 32-bit signed */
 #define CR0_PG                          (1ULL << 31)   // paging
 #define CR4_VMXE                        (1ULL << 13)
 #define CR4_FSGSBASE                    (1ULL << 16)
+#define CR4_OSXSAVE                     (1ULL << 18)
 
 // ── EFER bits ───────────────────────────────────────────────────────────────
 

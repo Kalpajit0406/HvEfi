@@ -5,10 +5,9 @@
 // exists in the WDK tree it must exist here too: the two trees program the
 // same VMCS controls, so any exit the WDK build can see, this build can see.
 
+#include "hv_efi.h"
 #include "hvdefs.h"
 // Pure EPT-violation decision, shared with HvDrv/hv_exit.c and unit-tested by
-// tools/unit/hv_ept_decision_test.c. Included here rather than duplicated so
-// the branch whose wrong answer is a hard hang exists exactly once.
 #include "../hv_ept_decision.h"
 #include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
 #include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
@@ -46,6 +45,12 @@ static void AdvanceGuestRip(void) {
 // exactly the failure this whole change is about.
 static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
 {
+  UINT64 devirtExitReason = 0, devirtRip = 0;
+  __vmx_vmread(VMCS_EXIT_REASON, &devirtExitReason);
+  __vmx_vmread(VMCS_GUEST_RIP, &devirtRip);
+  EfiPrint("[DEVIRT] CPU %u devirtualized! Cause=%u exitReason=0x%lx rip=0x%lx\n",
+           vcpu ? vcpu->ProcessorIndex : 0xFFFFFFFFu, cause, devirtExitReason, devirtRip);
+
   if (vcpu != NULL) {
     vcpu->Launched = FALSE;
     vcpu->VmxEnabled = FALSE;
@@ -382,6 +387,11 @@ static void HandleXsetbv(PVCPU vcpu, PGUEST_REGS regs) {
   if (!HvXsaveNewBitsSavable(value)) {
     HvInjectGp();
     return;
+  }
+
+  UINT64 hostCr4 = __readcr4();
+  if (!(hostCr4 & CR4_OSXSAVE)) {
+    __writecr4(hostCr4 | CR4_OSXSAVE);
   }
 
   _xsetbv(index, value);
@@ -779,10 +789,13 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
       g_Mailbox->VmresumeFailInstrErr = (UINT32)instrErr;
     }
   }
-  if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
-
   UINT64 rip = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
+
+  if ((reason < 64 && g_Hv.ExitCounts[reason] < 3) || reason == EXIT_REASON_TRIPLE_FAULT || reason == EXIT_REASON_EPT_MISCONFIG) {
+    EfiPrint("[VMEXIT] cpu=%u reason=%u rip=0x%lx\n", vcpu ? vcpu->ProcessorIndex : 0, reason, rip);
+  }
+  if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 
   // Runtime Exit Log Ring Buffer (Pass 96)
   {

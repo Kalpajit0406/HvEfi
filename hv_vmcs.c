@@ -11,9 +11,9 @@
 //
 // Called once per CPU after VMXON, from the IPI handler in hv_smp.c.
 
+#include "hv_efi.h"  // EfiFatal (via DEBUG) for the two fail-hard VMCS aborts below
 #include "hvdefs.h"
 #include "../hv_hostidt.h"
-#include "hv_efi.h"  // EfiFatal (via DEBUG) for the two fail-hard VMCS aborts below
 
 // ── GDT / Segment helpers ───────────────────────────────────────────────────
 //
@@ -115,6 +115,7 @@ void __halt(void);
 // Handler for every host IDT gate.
 VOID HvHostException(VOID) {
     g_HvHostFaultSeen++;
+    EfiPrint("[FATAL] HvHostException: Host IDT caught exception in VMX root mode! (faults=%u)\n", g_HvHostFaultSeen);
     for (;;) { __halt(); }
 }
 
@@ -470,7 +471,13 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     HvVmWriteChecked(VMCS_HOST_CR3, g_Hv.HostCr3);
 #endif
 
-    HvVmWriteChecked(VMCS_HOST_CR4, cr4);
+    int cpuid1[4] = {0};
+    __cpuid(cpuid1, 1);
+    UINT64 hostCr4 = cr4;
+    if (cpuid1[2] & (1 << 26)) {
+        hostCr4 |= CR4_OSXSAVE;
+    }
+    HvVmWriteChecked(VMCS_HOST_CR4, hostCr4);
 
     HvVmWriteChecked(VMCS_HOST_CS_SEL, cs & ~7);
     HvVmWriteChecked(VMCS_HOST_SS_SEL, ss & ~7);

@@ -60,6 +60,7 @@
   UefiBootServicesTableLib
   UefiRuntimeServicesTableLib
   BaseMemoryLib
+  DebugLib
 
 [BuildOptions]
   # Match HvEfi: intrinsics on, security cookie off (no CRT), strict preprocessor.

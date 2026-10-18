@@ -15,6 +15,8 @@
 
 #ifdef _KERNEL_MODE
 #include <ntddk.h>
+#elif defined(EFIAPI)
+// EDK2 defines UINT64 in ProcessorBind.h / Base.h
 #else
 #include <stdint.h>
 #include <stddef.h>

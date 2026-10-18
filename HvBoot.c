@@ -83,6 +83,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/DebugLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/DevicePath.h>
@@ -93,6 +94,7 @@
 // hv_efi_receipt.h (tokens + the rescue rule) so this module and the driver
 // cannot disagree about either.
 #include "hv_efi_bootcfg.h"
+#include "shared/hv_siphash.h"
 
 // Path on the ESP where the launcher's --install-core writes the hypervisor
 // core. Separate from the Boot#### slot's own file path (which points at
@@ -823,6 +825,7 @@ STATIC EFI_GUID mHvTicketGuid       = {
 // failing deep inside the driver, where the receipt cannot name the cause.
 STATIC BOOLEAN
 HvBootLoadTicket (
+  IN  EFI_FILE_PROTOCOL    *Vol OPTIONAL,
   IN  volatile HV_MAILBOX  *Mb
   )
 {
@@ -832,31 +835,38 @@ HvBootLoadTicket (
 
   ZeroMem (Ticket, sizeof (Ticket));
 
-  // Unprovisioned image: the sentinels were never overwritten. Do NOT call
-  // GetVariable with the sentinel as a name - publish nothing and let the core
-  // report "not provisioned" with the right instruction.
-  if ((mHvTicketVarName[0] == 0xEFEF) && (mHvTicketVarName[1] == 0xBEBE)) {
-    return FALSE;
-  }
-  if (mHvTicketGuid.Data1 == 0xDEADC0DE) {
-    return FALSE;
-  }
-
-  Size  = sizeof (Ticket);
-  Attrs = 0;
-  if (EFI_ERROR (gRT->GetVariable (mHvTicketVarName, &mHvTicketGuid,
-                                   &Attrs, &Size, Ticket))) {
-    return FALSE;
-  }
-  // Exactly the provisioned size, no more and no less. A longer variable is a
-  // different thing wearing this name; a shorter one is a torn write.
-  if (Size != HV_TICKET_BYTES) {
-    return FALSE;
+  // If sentinels were patched, attempt NVRAM GetVariable first
+  if (!((mHvTicketVarName[0] == 0xEFEF) && (mHvTicketVarName[1] == 0xBEBE)) &&
+      (mHvTicketGuid.Data1 != 0xDEADC0DE)) {
+    Size  = sizeof (Ticket);
+    Attrs = 0;
+    if (!EFI_ERROR (gRT->GetVariable (mHvTicketVarName, &mHvTicketGuid,
+                                     &Attrs, &Size, Ticket))) {
+      if (Size == HV_TICKET_BYTES) {
+        HvMailboxTicketSet (Mb, Ticket, (unsigned int)Size);
+        ZeroMem (Ticket, sizeof (Ticket));
+        return (BOOLEAN)HvMailboxTicketValid (Mb);
+      }
+    }
   }
 
-  HvMailboxTicketSet (Mb, Ticket, (unsigned int)Size);
-  ZeroMem (Ticket, sizeof (Ticket));
-  return (BOOLEAN)HvMailboxTicketValid (Mb);
+  // Fallback: check for \EFI\Boot\hvticket file on boot volume
+  if (Vol != NULL) {
+    EFI_FILE_PROTOCOL *tfile = NULL;
+    if (!EFI_ERROR (Vol->Open (Vol, &tfile, L"\\EFI\\Boot\\hvticket", EFI_FILE_MODE_READ, 0))) {
+      Size = sizeof (Ticket);
+      tfile->SetPosition (tfile, 0);
+      if (!EFI_ERROR (tfile->Read (tfile, &Size, Ticket)) && (Size == HV_TICKET_BYTES)) {
+        tfile->Close (tfile);
+        HvMailboxTicketSet (Mb, Ticket, (unsigned int)Size);
+        ZeroMem (Ticket, sizeof (Ticket));
+        return (BOOLEAN)HvMailboxTicketValid (Mb);
+      }
+      tfile->Close (tfile);
+    }
+  }
+
+  return FALSE;
 }
 
 STATIC VOID
@@ -992,7 +1002,7 @@ HvBootMailboxSetup (
   // the page is. Order matters: the core cannot observe the page until
   // Out->Pa is handed over, so anything written here is visible before the
   // core's first read of it.
-  if (!HvBootLoadTicket (mb)) {
+  if (!HvBootLoadTicket (Vol, mb)) {
     HvBootReceiptLine (Vol, "BOOT WARN no ticket");
   }
 
@@ -1420,10 +1430,38 @@ HvBootTryChainSlot (
     *VolRef = NULL;
   }
 
+  DEBUG ((DEBUG_INFO, "[HvBoot] Found Windows Boot Manager! Starting winImage...\n"));
   status = HvBootStartWindows (winImage);
+  DEBUG ((DEBUG_INFO, "[HvBoot] Windows Boot Manager returned: %r\n", status));
 
   gBS->FreePool (buffer);
   return status;
+}
+
+STATIC VOID
+HvBootConnectAll (
+  VOID
+  )
+{
+  EFI_STATUS  status;
+  UINTN       handleCount = 0;
+  EFI_HANDLE  *handleBuffer = NULL;
+  UINTN       i;
+
+  DEBUG ((DEBUG_INFO, "[HvBoot] Connecting all UEFI device drivers...\n"));
+  status = gBS->LocateHandleBuffer (
+                  AllHandles,
+                  NULL,
+                  NULL,
+                  &handleCount,
+                  &handleBuffer
+                  );
+  if (!EFI_ERROR (status) && handleBuffer != NULL) {
+    for (i = 0; i < handleCount; i++) {
+      gBS->ConnectController (handleBuffer[i], NULL, NULL, TRUE);
+    }
+    gBS->FreePool (handleBuffer);
+  }
 }
 
 STATIC EFI_STATUS
@@ -1441,6 +1479,9 @@ HvBootChainloadWindows (
   UINTN       count;
   BOOLEAN     found = FALSE;
 
+  HvBootConnectAll ();
+
+  DEBUG ((DEBUG_INFO, "[HvBoot] ChainloadWindows: reading BootOrder...\n"));
   // 1. Walk BootOrder to chainload Windows Boot Manager using its configured NVRAM slot
   status = gRT->GetVariable ((CHAR16 *)L"BootOrder", &gEfiGlobalVariableGuid, &attrs, &orderSize, NULL);
   if (status == EFI_BUFFER_TOO_SMALL && orderSize > 0) {
@@ -1465,7 +1506,57 @@ HvBootChainloadWindows (
     return status;
   }
 
-  // 3. Fallback: Build device path for \EFI\Microsoft\Boot\bootmgfw.efi on this ESP handle
+  // 3. Walk all filesystem handles to find Windows Boot Manager on any disk/partition
+  {
+    EFI_HANDLE *fsHandles = NULL;
+    UINTN      fsCount = 0;
+    status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleFileSystemProtocolGuid, NULL, &fsCount, &fsHandles);
+    if (!EFI_ERROR (status) && fsHandles != NULL) {
+      DEBUG ((DEBUG_INFO, "[HvBoot] ChainloadWindows: found %u filesystem handles\n", (UINT32)fsCount));
+      for (i = 0; i < fsCount; i++) {
+        EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fsProto = NULL;
+        EFI_FILE_PROTOCOL               *root = NULL;
+        EFI_FILE_PROTOCOL               *winFile = NULL;
+
+        if (EFI_ERROR (gBS->HandleProtocol (fsHandles[i], &gEfiSimpleFileSystemProtocolGuid, (VOID **)&fsProto)) || fsProto == NULL) {
+          continue;
+        }
+        if (EFI_ERROR (fsProto->OpenVolume (fsProto, &root)) || root == NULL) {
+          continue;
+        }
+        status = root->Open (root, &winFile, (CHAR16 *)HV_BOOT_WINDOWS_PATH, EFI_FILE_MODE_READ, 0);
+        if (!EFI_ERROR (status) && winFile != NULL) {
+          winFile->Close (winFile);
+          root->Close (root);
+
+          DEBUG ((DEBUG_INFO, "[HvBoot] Found Windows on filesystem %u! Loading image...\n", (UINT32)i));
+          EFI_DEVICE_PATH_PROTOCOL *winDevPath = HvBootBuildFilePath (fsHandles[i], HV_BOOT_WINDOWS_PATH);
+          if (winDevPath != NULL) {
+            EFI_HANDLE winImage = NULL;
+            status = gBS->LoadImage (TRUE, ImageHandle, winDevPath, NULL, 0, &winImage);
+            gBS->FreePool (winDevPath);
+            if (!EFI_ERROR (status) && winImage != NULL) {
+              if (VolRef != NULL && *VolRef != NULL) {
+                HvBootReceiptLine (*VolRef, "CHAIN WIN fs start");
+                (*VolRef)->Close (*VolRef);
+                *VolRef = NULL;
+              }
+              gBS->FreePool (fsHandles);
+              DEBUG ((DEBUG_INFO, "[HvBoot] Launching Windows Boot Manager...\n"));
+              return HvBootStartWindows (winImage);
+            } else {
+              DEBUG ((DEBUG_INFO, "[HvBoot] LoadImage failed: %r\n", status));
+            }
+          }
+        } else {
+          root->Close (root);
+        }
+      }
+      gBS->FreePool (fsHandles);
+    }
+  }
+
+  // 4. Fallback: Build device path for \EFI\Microsoft\Boot\bootmgfw.efi on this ESP handle
   if (EspHandle != NULL) {
     EFI_DEVICE_PATH_PROTOCOL  *winPath;
     EFI_HANDLE                winImage = NULL;
@@ -1516,6 +1607,7 @@ HvBootChainloadWindows (
     }
   }
 
+  DEBUG ((DEBUG_INFO, "[HvBoot] ChainloadWindows: no Windows Boot Manager found, returning EFI_NOT_FOUND\n"));
   return EFI_NOT_FOUND;
 }
 
@@ -1739,6 +1831,65 @@ HvBootMain (
     HvBootReceiptLine (vol, "FULL DONE");
     HvBootReceiptLine (vol, "BOOT DONE");
     st = EFI_SUCCESS;
+  }
+
+  // =========================================================================
+  // Authenticated VMCALL Detection Probe (Guest Non-Root Verification)
+  // =========================================================================
+  {
+    static const UINT8 VmcallCode[] = {
+        0x4C, 0x8B, 0x54, 0x24, 0x28,  // mov r10, [rsp+28h]
+        0x4C, 0x8B, 0x5C, 0x24, 0x30,  // mov r11, [rsp+30h]
+        0x0F, 0x01, 0xC1,              // vmcall
+        0xC3                           // ret
+    };
+    typedef UINT64 (*VMCALL_STUB_FN)(UINT64 rcx, UINT64 rdx, UINT64 r8, UINT64 r9, UINT64 r10, UINT64 r11);
+    VMCALL_STUB_FN VmcallFn = (VMCALL_STUB_FN)(UINTN)VmcallCode;
+
+    volatile HV_MAILBOX *mb = (volatile HV_MAILBOX *)(UINTN)mbox.Pa;
+    if (mb != NULL && HvMailboxValid(mb)) {
+      UINT64 ticketWords[4];
+      CopyMem (ticketWords, (VOID *)mb->Ticket, 32);
+      UINT64 bootMagic = HvBootMagic (ticketWords);
+
+      DEBUG ((DEBUG_INFO, "\n[HvBoot] Probing hypervisor via authenticated VMCALL...\n"));
+      DEBUG ((DEBUG_INFO, "[HvBoot] Calculated BootMagic: 0x%016lx\n", bootMagic));
+
+      UINT64 nonce = VmcallFn (bootMagic, 0 /* HV_HYPERCALL_DETECT */, 0, 0, 0, 0);
+      if (nonce != 0 && nonce != (UINT64)-1 && nonce != 0xFFFFFFFFFFFFFFFFULL) {
+        DEBUG ((DEBUG_INFO, "[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x%016lx\n", nonce));
+        HvBootReceiptLine (vol, "VMCALL DETECT SUCCESS");
+
+        // Derive session key
+        UINT64 key0 = 0, key1 = 0;
+        HvDeriveSession (ticketWords, nonce, &key0, &key1);
+        UINT64 sessionMagic = HvSessionMagic (key0, key1);
+        DEBUG ((DEBUG_INFO, "[+] [HvBoot] Session Derived! SessionMagic = 0x%016lx\n", sessionMagic));
+
+        // Query Status
+        UINT64 seq = 1;
+        UINT64 words[6] = { sessionMagic, 6 /* HV_HYPERCALL_QUERY_STATUS */, 0, 0, 0, seq };
+        UINT64 mac = HvMacTuple (key0, key1, words);
+        UINT64 status = VmcallFn (sessionMagic, 6, 0, 0, mac, 0);
+        DEBUG ((DEBUG_INFO, "[+] [HvBoot] Hypervisor Status: 0x%016lx (vCPUs: %u, Running: %u)\n",
+                status, (UINT32)(status & 0xFFFF), (UINT32)((status >> 63) & 1)));
+        HvBootReceiptNum (vol, "VMCALL STATUS vcpus", (UINT32)(status & 0xFFFF));
+
+        // Selftest
+        seq++;
+        UINT64 words2[6] = { sessionMagic, 8 /* HV_HYPERCALL_SELFTEST */, 0, 0, 0, seq };
+        UINT64 mac2 = HvMacTuple (key0, key1, words2);
+        UINT64 selftest = VmcallFn (sessionMagic, 8, 0, 0, mac2, 0);
+        if (selftest == 0) {
+          DEBUG ((DEBUG_INFO, "[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.\n\n"));
+          HvBootReceiptLine (vol, "VMCALL SELFTEST PASS");
+        } else {
+          DEBUG ((DEBUG_INFO, "[-] [HvBoot] HV_HYPERCALL_SELFTEST: FAILED (0x%lx)\n\n", selftest));
+        }
+      } else {
+        DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED (ret = 0x%016lx)\n", nonce));
+      }
+    }
   }
 
   // Chainload Windows Boot Manager directly instead of returning error to BDS.
