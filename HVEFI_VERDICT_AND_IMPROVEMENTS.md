@@ -455,6 +455,23 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
      * `HandleWrmsr` silently ignores writes to `MSR_IA32_FEATURE_CONTROL` rather than injecting `#GP`.
      * `CpuidTimingPad` disabled during EFI boot.
 
+### 5.5. Dell Bare-Metal Post-Launch Freeze Resolution: UEFI TPL Deadlock Elimination
+* **Primary Evidence File**: `receipts/dell_baremetal_pass1_cpuid_loop.log`
+* **Target Environment**: Physical Dell G15 5530, Intel Core i5-13450HX (16 logical threads), InsydeH2O BIOS 1.35.0.
+* **Failure Symptom**: After selecting the USB drive from the F12 boot menu, the system virtualized all 16 cores, passed VMCALL selftest, successfully launched `bootmgfw.efi` via `HvBootStartWindows`, serviced 57,862 VM-exits in ~750ms, and froze indefinitely at the Dell splash screen before reaching the Windows desktop.
+* **Root Cause Decoded**:
+  1. **UEFI Specification Violation & TPL Inversion Deadlock**:
+     `HvBootHeartbeatTick` was registered as a periodic timer (`EVT_TIMER | EVT_NOTIFY_SIGNAL`, period 250ms) executing at `TPL_CALLBACK` (level 8). Inside this periodic timer interrupt, it executed synchronous file I/O (`HvBootReceiptLine`: `Open`, `Write`, `Flush`, `Close`) and pool allocations (`HvBootHbLogRip`: `LocateHandleBuffer`, `AllocatePool`, `FreePool`).
+     Per UEFI 2.10 Specification Section 7.1: *"File System protocol functions, Block I/O functions, and Simple Text Output functions ... MUST NOT be called from TPL_CALLBACK"*.
+     When `bootmgfw.efi` or `winload.efi` called `AllocatePool` or initiated disk I/O at `TPL_APPLICATION` (level 4), the timer interrupt interrupted it at `TPL_CALLBACK`. The reentrant calls attempted to acquire internal firmware spinlocks (e.g. `gPoolLock` or the FAT volume mutex) already held by the interrupted thread, causing an unrecoverable **deadlock** that permanently froze the processor with interrupts masked.
+  2. **ExitBootServices Teardown Conflict**:
+     `HvBootEbsNotify` attempted to write `"BOOT EBS"` to `hvefi.log` via the FAT filesystem during `ExitBootServices`. Calling Boot Services file protocols after `ExitBootServices` begins violates UEFI rules and deadlocks with `IntelVTdDxe`'s DMA remapping teardown.
+* **Architectural Resolution Implemented (Commit `32873ef`)**:
+  1. **Elimination of Timer and EBS Interrupts**: Completely removed `HvBootHeartbeatStart`, `HvBootHeartbeatTick`, `HvBootHeartbeatStop`, `HvBootEbsNotify`, and associated logging helpers from `HvBoot.c`.
+  2. **Direct Windows Handoff**: `HvBootStartWindows` now directly calls `gBS->StartImage(WinImage, NULL, NULL)`. Windows Boot Manager executes with 100% exclusive, uninterrupted control of the platform, free from background timer interruptions or reentrant storage calls.
+  3. **Clean Storage Closure**: All filesystem handles on the USB ESP are flushed and closed before `StartImage` is entered.
+  4. **Production Deployment**: Recompiled both `HvEfi.efi` and `HvBoot.efi` cleanly in EDK2, patched provisioning sentinels via `patch_sentinels.py`, deployed to `D:\EFI\Boot\HvBoot.efi`, `D:\EFI\Boot\BOOTX64.EFI`, and `D:\EFI\Boot\hvcore.efi`, with `hvcfg` confirmed at `'F'`.
+
 ---
 
 ## 6. Next Steps for Production Hardening
@@ -467,6 +484,7 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
    Virtualize `RDTSC`/`RDTSCP` timing when VMCS exit profiling is enabled to mitigate VM-exit timing side-channels.
 4. **Kernel Bridge Driver**:
    Develop a dedicated Windows Ring-0 companion driver (`HvBridge.sys`) to manage authenticated hypercalls, process introspection, and physical memory translation from user space.
+
 
 
 
