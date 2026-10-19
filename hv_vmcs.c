@@ -420,7 +420,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
 
     HvVmWriteChecked(VMCS_GUEST_CR0, cr0);
     HvVmWriteChecked(VMCS_GUEST_CR3, cr3);
-    HvVmWriteChecked(VMCS_GUEST_CR4, cr4 & ~CR4_VMXE);
+    HvVmWriteChecked(VMCS_GUEST_CR4, cr4);
     HvVmWriteChecked(VMCS_GUEST_DR7, dr7);
 
     HvVmWriteChecked(VMCS_GUEST_DEBUGCTL,      __readmsr(MSR_IA32_DEBUGCTL));
