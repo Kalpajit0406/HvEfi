@@ -947,6 +947,167 @@ HvBootPathTargetsBootMgr (
   return FALSE;
 }
 
+STATIC EFI_HANDLE
+HvBootFindPartitionByHdNode (
+  IN HARDDRIVE_DEVICE_PATH *HdNode
+  )
+{
+  EFI_STATUS  status;
+  UINTN       handleCount = 0;
+  EFI_HANDLE  *handles = NULL;
+  UINTN       i;
+  EFI_GUID    dpGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+
+  if (HdNode == NULL) {
+    return NULL;
+  }
+
+  status = gBS->LocateHandleBuffer (ByProtocol, &dpGuid, NULL, &handleCount, &handles);
+  if (EFI_ERROR (status) || handles == NULL) {
+    return NULL;
+  }
+
+  for (i = 0; i < handleCount; i++) {
+    EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
+    status = gBS->HandleProtocol (handles[i], &dpGuid, (VOID **)&dp);
+    if (EFI_ERROR (status) || dp == NULL) {
+      continue;
+    }
+
+    EFI_DEVICE_PATH_PROTOCOL *node = dp;
+    while (!HvDpIsEnd (node)) {
+      UINT16 len = HvDpNodeLen (node);
+      if (len < 4) {
+        break;
+      }
+      if (node->Type == HV_DP_TYPE_MEDIA && node->SubType == 0x01 /* HARDDRIVE */) {
+        HARDDRIVE_DEVICE_PATH *cand = (HARDDRIVE_DEVICE_PATH *)node;
+        if (cand->SignatureType == HdNode->SignatureType &&
+            CompareMem (cand->Signature, HdNode->Signature, sizeof (cand->Signature)) == 0) {
+          EFI_HANDLE matchedHandle = handles[i];
+          gBS->FreePool (handles);
+          return matchedHandle;
+        }
+      }
+      node = (EFI_DEVICE_PATH_PROTOCOL *)((UINT8 *)node + len);
+    }
+  }
+
+  gBS->FreePool (handles);
+  return NULL;
+}
+
+STATIC EFI_HANDLE
+HvBootFindWindowsEspHandle (
+  VOID
+  )
+{
+  EFI_STATUS                       status;
+  UINTN                            fsCount = 0;
+  EFI_HANDLE                       *fsHandles = NULL;
+  UINTN                            i;
+  EFI_GUID                         fsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+
+  status = gBS->LocateHandleBuffer (ByProtocol, &fsGuid, NULL, &fsCount, &fsHandles);
+  if (EFI_ERROR (status) || fsHandles == NULL) {
+    return NULL;
+  }
+
+  for (i = 0; i < fsCount; i++) {
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fsProto = NULL;
+    EFI_FILE_PROTOCOL               *root = NULL;
+    EFI_FILE_PROTOCOL               *winFile = NULL;
+
+    if (EFI_ERROR (gBS->HandleProtocol (fsHandles[i], &fsGuid, (VOID **)&fsProto)) || fsProto == NULL) {
+      continue;
+    }
+    if (EFI_ERROR (fsProto->OpenVolume (fsProto, &root)) || root == NULL) {
+      continue;
+    }
+    status = root->Open (root, &winFile, (CHAR16 *)HV_BOOT_WINDOWS_PATH, EFI_FILE_MODE_READ, 0);
+    if (!EFI_ERROR (status) && winFile != NULL) {
+      winFile->Close (winFile);
+      root->Close (root);
+      EFI_HANDLE matchedHandle = fsHandles[i];
+      gBS->FreePool (fsHandles);
+      return matchedHandle;
+    }
+    root->Close (root);
+  }
+
+  gBS->FreePool (fsHandles);
+  return NULL;
+}
+
+STATIC BOOLEAN
+HvBootGetWindowsLoadOptions (
+  OUT VOID   **OutOptions,
+  OUT UINT32 *OutOptionsSize
+  )
+{
+  EFI_STATUS status;
+  UINT8      *buffer = NULL;
+  UINTN      size = BOOT_OPTION_MAX;
+  UINT32     attrs = 0;
+  CHAR16     name[12];
+  UINTN      offset;
+  UINT16     fpLength;
+  UINTN      optionsSize;
+  UINT8      *options;
+  VOID       *copy = NULL;
+
+  if (OutOptions == NULL || OutOptionsSize == NULL) {
+    return FALSE;
+  }
+  *OutOptions = NULL;
+  *OutOptionsSize = 0;
+
+  status = gBS->AllocatePool (EfiBootServicesData, size, (VOID **)&buffer);
+  if (EFI_ERROR (status) || buffer == NULL) {
+    return FALSE;
+  }
+
+  HvBootFormatHexSlot (name, (UINT16)BOOT_SLOT_FALLBACK);
+  status = gRT->GetVariable (name, &gEfiGlobalVariableGuid, &attrs, &size, buffer);
+  if (EFI_ERROR (status) || size < 6) {
+    gBS->FreePool (buffer);
+    return FALSE;
+  }
+
+  CopyMem (&fpLength, buffer + 4, sizeof (fpLength));
+
+  for (offset = 6; offset + 2 <= size; offset += 2) {
+    UINT16 ch;
+    CopyMem (&ch, buffer + offset, sizeof (ch));
+    if (ch == 0) {
+      offset += 2;
+      break;
+    }
+  }
+
+  if (offset > size || fpLength > size - offset) {
+    gBS->FreePool (buffer);
+    return FALSE;
+  }
+
+  options     = buffer + offset + fpLength;
+  optionsSize = size - (offset + fpLength);
+
+  if (optionsSize > 0) {
+    status = gBS->AllocatePool (EfiBootServicesData, optionsSize, &copy);
+    if (!EFI_ERROR (status) && copy != NULL) {
+      CopyMem (copy, options, optionsSize);
+      *OutOptions     = copy;
+      *OutOptionsSize = (UINT32)optionsSize;
+      gBS->FreePool (buffer);
+      return TRUE;
+    }
+  }
+
+  gBS->FreePool (buffer);
+  return FALSE;
+}
+
 STATIC EFI_STATUS
 HvBootTryChainSlot (
   IN     UINT16              Slot,
@@ -969,6 +1130,7 @@ HvBootTryChainSlot (
   EFI_HANDLE                 winImage = NULL;
   EFI_LOADED_IMAGE_PROTOCOL  *info = NULL;
   EFI_GUID                   lipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+  EFI_GUID                   fsGuid  = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
 
   *Found = FALSE;
 
@@ -1016,29 +1178,69 @@ HvBootTryChainSlot (
   // 1. Try loading via the device path stored in the Boot#### slot
   status = gBS->LoadImage (TRUE, ImageHandle, path, NULL, 0, &winImage);
 
-  // 2. If short-form path fails on Dell firmware, build canonical ESP path
-  if (EFI_ERROR (status) && EspHandle != NULL) {
-    EFI_DEVICE_PATH_PROTOCOL *winPath = HvBootBuildFilePath (EspHandle, HV_BOOT_WINDOWS_PATH);
-    if (winPath != NULL) {
-      if (VolRef != NULL && *VolRef != NULL) {
-        HvBootReceiptLine (*VolRef, "CHAIN WIN esp retry");
+  // 2. If short-form path fails on Dell firmware, locate the target partition handle
+  if (EFI_ERROR (status)) {
+    EFI_HANDLE targetHandle = NULL;
+
+    // A. Match partition by HARDDRIVE node signature in path
+    if (path->Type == HV_DP_TYPE_MEDIA && path->SubType == 0x01) {
+      targetHandle = HvBootFindPartitionByHdNode ((HARDDRIVE_DEVICE_PATH *)path);
+    }
+
+    // B. Check if EspHandle actually contains bootmgfw.efi
+    if (targetHandle == NULL && EspHandle != NULL) {
+      EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *checkFs = NULL;
+      EFI_FILE_PROTOCOL               *checkRoot = NULL;
+      EFI_FILE_PROTOCOL               *checkWin = NULL;
+      if (!EFI_ERROR (gBS->HandleProtocol (EspHandle, &fsGuid, (VOID **)&checkFs)) && checkFs != NULL) {
+        if (!EFI_ERROR (checkFs->OpenVolume (checkFs, &checkRoot)) && checkRoot != NULL) {
+          if (!EFI_ERROR (checkRoot->Open (checkRoot, &checkWin, (CHAR16 *)HV_BOOT_WINDOWS_PATH, EFI_FILE_MODE_READ, 0)) && checkWin != NULL) {
+            checkWin->Close (checkWin);
+            targetHandle = EspHandle;
+          }
+          checkRoot->Close (checkRoot);
+        }
       }
-      status = gBS->LoadImage (TRUE, ImageHandle, winPath, NULL, 0, &winImage);
-      gBS->FreePool (winPath);
+    }
+
+    // C. Search all filesystems for one containing bootmgfw.efi
+    if (targetHandle == NULL) {
+      targetHandle = HvBootFindWindowsEspHandle ();
+    }
+
+    if (targetHandle != NULL) {
+      EFI_DEVICE_PATH_PROTOCOL *winPath = HvBootBuildFilePath (targetHandle, HV_BOOT_WINDOWS_PATH);
+      if (winPath != NULL) {
+        if (VolRef != NULL && *VolRef != NULL) {
+          HvBootReceiptLine (*VolRef, "CHAIN WIN esp retry");
+        }
+        status = gBS->LoadImage (TRUE, ImageHandle, winPath, NULL, 0, &winImage);
+        gBS->FreePool (winPath);
+      }
     }
   }
 
-  // 3. If device path loading still failed, try buffer load
-  if (EFI_ERROR (status) && VolRef != NULL && *VolRef != NULL) {
-    VOID       *winBuf = NULL;
-    UINTN      winSize = 0;
-    EFI_STATUS readSt  = HvBootReadFile (*VolRef, HV_BOOT_WINDOWS_PATH, &winBuf, &winSize);
-    if (!EFI_ERROR (readSt) && winBuf != NULL && winSize > 0) {
-      if (VolRef != NULL && *VolRef != NULL) {
-        HvBootReceiptLine (*VolRef, "CHAIN WIN buf retry");
+  // 3. If device path loading still failed, try buffer load from target filesystem
+  if (EFI_ERROR (status)) {
+    EFI_HANDLE targetHandle = HvBootFindWindowsEspHandle ();
+    if (targetHandle != NULL) {
+      EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *tFs = NULL;
+      EFI_FILE_PROTOCOL               *tRoot = NULL;
+      if (!EFI_ERROR (gBS->HandleProtocol (targetHandle, &fsGuid, (VOID **)&tFs)) && tFs != NULL) {
+        if (!EFI_ERROR (tFs->OpenVolume (tFs, &tRoot)) && tRoot != NULL) {
+          VOID       *winBuf = NULL;
+          UINTN      winSize = 0;
+          EFI_STATUS readSt  = HvBootReadFile (tRoot, HV_BOOT_WINDOWS_PATH, &winBuf, &winSize);
+          tRoot->Close (tRoot);
+          if (!EFI_ERROR (readSt) && winBuf != NULL && winSize > 0) {
+            if (VolRef != NULL && *VolRef != NULL) {
+              HvBootReceiptLine (*VolRef, "CHAIN WIN buf retry");
+            }
+            status = gBS->LoadImage (TRUE, ImageHandle, NULL, winBuf, winSize, &winImage);
+            gBS->FreePool (winBuf);
+          }
+        }
       }
-      status = gBS->LoadImage (TRUE, ImageHandle, NULL, winBuf, winSize, &winImage);
-      gBS->FreePool (winBuf);
     }
   }
 
@@ -1171,6 +1373,19 @@ HvBootChainloadWindows (
             status = gBS->LoadImage (TRUE, ImageHandle, winDevPath, NULL, 0, &winImage);
             gBS->FreePool (winDevPath);
             if (!EFI_ERROR (status) && winImage != NULL) {
+              VOID                      *optBuf = NULL;
+              UINT32                    optSize = 0;
+              EFI_LOADED_IMAGE_PROTOCOL *fsLip  = NULL;
+              EFI_GUID                  lipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+
+              // Assign BCD LoadOptions even on filesystem walk fallback
+              if (!EFI_ERROR (gBS->HandleProtocol (winImage, &lipGuid, (VOID **)&fsLip)) && fsLip != NULL) {
+                if (HvBootGetWindowsLoadOptions (&optBuf, &optSize) && optBuf != NULL && optSize > 0) {
+                  fsLip->LoadOptions     = optBuf;
+                  fsLip->LoadOptionsSize = optSize;
+                }
+              }
+
               if (VolRef != NULL && *VolRef != NULL) {
                 HvBootReceiptLine (*VolRef, "CHAIN WIN fs start");
                 (*VolRef)->Close (*VolRef);
