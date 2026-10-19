@@ -603,6 +603,9 @@ HvBootMailboxSetup (
       HvBootReceiptNum (Vol, "LAST VMRESUME fails", leftover.VmresumeFailCount);
       HvBootReceiptNum (Vol, "LAST VMRESUME err", leftover.VmresumeFailInstrErr);
     }
+    if (leftover.HostFaultCount > 0) {
+      HvBootReceiptNum (Vol, "LAST HOST faults", leftover.HostFaultCount);
+    }
     if (leftover.HypercallCount > 0) {
       HvBootReceiptNum (Vol, "LAST HCALL count", leftover.HypercallCount);
       HvBootReceiptNum (Vol, "LAST HCALL last_id", leftover.LastHypercallId);
@@ -620,7 +623,14 @@ HvBootMailboxSetup (
       HvBootReceiptNum (Vol, "LAST EXIT rip_hi", leftover.LastExitRipHigh[lastIdx]);
       for (ri = 0; ri < 16; ri++) {
         UINT32 slot = (leftover.TotalExitCount - 16u + ri) & 15u;
+        HvBootReceiptNum (Vol, "LAST RING slot", slot);
         HvBootReceiptNum (Vol, "LAST RING reason", leftover.LastExitReason[slot]);
+        HvBootReceiptNum (Vol, "LAST RING cpu", leftover.LastExitCpu[slot]);
+        HvBootReceiptNum (Vol, "LAST RING rip_lo", leftover.LastExitRipLow[slot]);
+        HvBootReceiptNum (Vol, "LAST RING rip_hi", leftover.LastExitRipHigh[slot]);
+        if (leftover.LastExitLeaf[slot] != 0) {
+          HvBootReceiptNum (Vol, "LAST RING leaf", leftover.LastExitLeaf[slot]);
+        }
       }
     }
     if (leftover.ActualPinCtls != 0 || leftover.ActualExitCtls != 0) {

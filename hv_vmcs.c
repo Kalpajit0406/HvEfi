@@ -115,7 +115,9 @@ void __halt(void);
 // Handler for every host IDT gate.
 VOID HvHostException(VOID) {
     g_HvHostFaultSeen++;
-    EfiPrint("[FATAL] HvHostException: Host IDT caught exception in VMX root mode! (faults=%u)\n", g_HvHostFaultSeen);
+    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
+        g_Mailbox->HostFaultCount = g_HvHostFaultSeen;
+    }
     for (;;) { __halt(); }
 }
 
@@ -274,10 +276,13 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // disables all hardware counters for the machine (and is a loud tell).
     // Leaving the control clear means VMX never touches the MSR at all, so the
     // PMU stays transparent across every exit/entry without a bitmap trap.
+    // ACK_INT_ON_EXIT is intentionally omitted: pinCtls has bit 0
+    // (PIN_BASED_EXT_INT_EXIT) cleared, allowing external interrupts to pass
+    // straight to the guest IDT without exiting. Under Intel SDM Vol 3C §26.2.1.1,
+    // ACK_INT_ON_EXIT requires EXT_INT_EXIT=1, or VM entry fails / LAPIC desyncs.
     UINT32 exitCtls = AdjustControls(
         EXIT_CTRL_HOST_ADDR_SPACE_SIZE | EXIT_CTRL_SAVE_EFER |
-        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT |
-        EXIT_CTRL_ACK_INT_ON_EXIT,
+        EXIT_CTRL_LOAD_EFER | EXIT_CTRL_SAVE_PAT | EXIT_CTRL_LOAD_PAT,
         MSR_IA32_VMX_TRUE_EXIT_CTLS);
     HvVmWriteChecked(VMCS_EXIT_CONTROLS, exitCtls);
 

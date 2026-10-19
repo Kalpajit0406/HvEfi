@@ -47,9 +47,8 @@ static BOOLEAN HvDevirtualizeThisCpu(PVCPU vcpu, UINT32 cause)
 {
   UINT64 devirtExitReason = 0, devirtRip = 0;
   __vmx_vmread(VMCS_EXIT_REASON, &devirtExitReason);
-  __vmx_vmread(VMCS_GUEST_RIP, &devirtRip);
-  EfiPrint("[DEVIRT] CPU %u devirtualized! Cause=%u exitReason=0x%lx rip=0x%lx\n",
-           vcpu ? vcpu->ProcessorIndex : 0xFFFFFFFFu, cause, devirtExitReason, devirtRip);
+  (void)devirtExitReason;
+  (void)devirtRip;
 
   if (vcpu != NULL) {
     vcpu->Launched = FALSE;
@@ -215,22 +214,9 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
     return TRUE;
   }
 
-  // Hypervisor synthetic leaves (0x40000000 - 0x400000FF):
-  // Since we mask hypervisor presence (CPUID.1:ECX[31] = 0), any query in this
-  // synthetic range must return all zeros (EAX=0 max leaf) so that Windows Boot
-  // Manager's hypervisor probe definitely detects that no hypervisor enlightenment
-  // interface is present.
-  if (leaf >= 0x40000000 && leaf <= 0x400000FF) {
-    regs->Rax = 0;
-    regs->Rbx = 0;
-    regs->Rcx = 0;
-    regs->Rdx = 0;
-    CpuidTimingPad(entryTsc);
-    AdvanceGuestRip();
-    return TRUE;
-  }
-
-  // Every other leaf is answered by running real CPUID and memoising it.
+  // Every leaf — including out-of-range leaves — is answered by running
+  // real hardware CPUID and memoising it. On bare metal, Intel CPUs return the
+  // highest standard leaf data (with hardware EBX/ECX/EDX) for unmodeled leaves.
   HvCpuidLookup(vcpu, leaf, subleaf, out);
 
   if (leaf == 1) {
@@ -792,9 +778,6 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
   __vmx_vmread(VMCS_GUEST_RSP, &rsp);
 
-  if ((reason < 64 && g_Hv.ExitCounts[reason] < 3) || reason == EXIT_REASON_TRIPLE_FAULT || reason == EXIT_REASON_EPT_MISCONFIG) {
-    EfiPrint("[VMEXIT] cpu=%u reason=%u rip=0x%lx\n", vcpu ? vcpu->ProcessorIndex : 0, reason, rip);
-  }
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 
   // Runtime Exit Log Ring Buffer (Pass 96)
@@ -820,13 +803,8 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     if (reason == EXIT_REASON_CPUID && regs != NULL) {
       g_Mailbox->LastExitLeaf[idx]    = (UINT32)regs->Rax;
       g_Mailbox->LastExitSubleaf[idx] = (UINT32)regs->Rcx;
-      UINT64 caller = 0;
-      if (rsp >= 0x1000 && rsp < 0x1000000000ULL) {
-        // In AsmCpuid, 3 registers (rbx, rax, rdx) were pushed, so return address is at rsp + 24
-        caller = *(volatile UINT64*)(UINTN)(rsp + 24);
-      }
-      g_Mailbox->LastExitCallerRipLow[idx]  = (UINT32)caller;
-      g_Mailbox->LastExitCallerRipHigh[idx] = (UINT32)(caller >> 32);
+      g_Mailbox->LastExitCallerRipLow[idx]  = 0;
+      g_Mailbox->LastExitCallerRipHigh[idx] = 0;
     } else {
       g_Mailbox->LastExitLeaf[idx]          = 0;
       g_Mailbox->LastExitSubleaf[idx]       = 0;
