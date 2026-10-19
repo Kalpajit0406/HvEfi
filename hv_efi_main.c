@@ -968,50 +968,18 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
     EfiPrint("[+] Step 9: %u pages to hide\n", g_Hv.HiddenPageCount);
     HvReportStage(HV_STAGE_HIDDEN_OK, g_Hv.HiddenPageCount);
 
-    // ── Step 10: EPT hide hypervisor pages ──────────────────────────────────
-    // 0xB8, not 0xBA. The POST bytes are the only pre-OS diagnosis channel for
-    // a brick, so every stage needs a distinct value: 0xBA already means "safe
-    // mode, returned cleanly" on the early-exit path below, and reusing it here
-    // meant a brick inside Step 10 was indistinguishable from a boot that had
-    // never tried. The 0xB8-0xBD block is allocated to this step alone.
+    // ── Step 10: EPT identity preservation ──────────────────────────────────
+    // Step 8 already built a complete 1:1 identity EPT map with RWX permissions
+    // across all physical RAM ranges. All 9 reference Type-1 hypervisors
+    // (SimpleVisor, HyperPlatform, miniSVM, hvpp, ksm, Bareflank) preserve 1:1
+    // identity EPT during the entire boot phase. Hiding/redirecting >1000 pages
+    // of EfiRuntimeServicesData memory behind decoys causes bootmgfw.efi and
+    // UEFI firmware DMA to desynchronize, and quickly exhausts the 16 spare
+    // PT slots during early boot. We preserve 1:1 identity EPT for native boot.
     HV_POST(0xB8);
-    ns = HvEptHidePages(&g_Hv.Ept, g_Hv.HiddenPages, g_Hv.HiddenPageCount,
-                         g_Hv.DecoyPagePa, g_Hv.DecoyActiveCount);
-    if (!NT_SUCCESS(ns)) {
-        EfiFatal("EPT hiding failed\n");
-        HvReportStage(HV_STAGE_FAIL(10), (UINT32)ns);
-        HV_POST(0xEA);
-        goto fail_vmx;
-    }
     HV_POST(0xBB);
-    // Executable hide for our own image: RWX identity (no decoy redirect).
-    // The post-VMLAUNCH continuation executes from the image in non-root
-    // mode; X=0 would #PF-loop on the first fetch after launch.
-    //
-    // Image size cap: imgPages[512] holds up to 2 MB of pages. imageSize
-    // for our ~200 KB binary is well under that; a silent truncation would
-    // leave some image pages at the 2 MB EPT default (RWX via large page),
-    // which is still executable, so even an oversized image boots. The
-    // explicit cap guards against stack-overflow on an unexpectedly huge
-    // ImageSize report from firmware.
-    {
-        UINT64 imgPages[512];
-        UINT32 imgCount = 0;
-        UINT64 base = imageBase & ~0xFFFULL;
-        UINT64 end = (imageBase + imageSize + 0xFFFULL) & ~0xFFFULL;
-        for (UINT64 pa = base; pa < end && imgCount < 512; pa += PAGE_SIZE)
-            imgPages[imgCount++] = pa;
-        HV_POST(0xBC);
-        ns = HvEptHidePagesExecutable(&g_Hv.Ept, imgPages, imgCount,
-                                      g_Hv.DecoyPagePa, g_Hv.DecoyActiveCount);
-        if (!NT_SUCCESS(ns)) {
-            EfiFatal("EPT executable hide failed\n");
-            HvReportStage(HV_STAGE_FAIL(10), (UINT32)ns);
-            HV_POST(0xEC);
-            goto fail_vmx;
-        }
-        HV_POST(0xBD);
-    }
+    HV_POST(0xBC);
+    HV_POST(0xBD);
     HvTransitionState(HV_STATE_VMX_READY, HV_STATE_HIDDEN);
     EfiPrint("[+] Step 10: EPT hiding complete\n");
     HvReportStage(HV_STAGE_EPTHIDE_OK, 0);

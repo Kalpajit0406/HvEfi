@@ -309,13 +309,15 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     HvVmWriteChecked(VMCS_PF_ERROR_CODE_MATCH, 0);
     HvVmWriteChecked(VMCS_CR3_TARGET_COUNT,    0);
     // Unrestricted guest is enabled (PROC2_UNRESTRICTED_GUEST).
-    // Zero CR0 and CR4 guest/host masks so the OS AP bringup trampoline can
-    // transition natively from real mode (PE=0, PG=0) to protected mode (PE=1)
-    // and long mode (PG=1) without trapping every CR write into root mode.
-    // Zeroing these masks matches all reference Type-1 hypervisors (HyperPlatform,
-    // SimpleVisor, hvpp, ksm, Bareflank) and eliminates the AP trampoline stall.
+    // Zero CR0 guest/host mask so the OS AP bringup trampoline can transition
+    // natively from real mode (PE=0, PG=0) to protected mode (PE=1) and long mode
+    // (PG=1) without trapping every CR write into root mode.
+    // For CR4, set CR4_VMXE in the mask: this ensures any attempt by guest code
+    // to enable VMX traps to HandleCrAccess instead of raising an unhandled
+    // hardware #GP(0) (Intel SDM Vol 3C §25.1.3). For native AP bringup, non-VMX
+    // CR4 writes (PAE, PSE, etc.) match the read shadow and execute natively.
     HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, 0);
-    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, 0);
+    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE);
     HvVmWriteChecked(VMCS_CR0_READ_SHADOW,     cr0);
     HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4 & ~CR4_VMXE);
 
@@ -418,7 +420,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
 
     HvVmWriteChecked(VMCS_GUEST_CR0, cr0);
     HvVmWriteChecked(VMCS_GUEST_CR3, cr3);
-    HvVmWriteChecked(VMCS_GUEST_CR4, cr4);
+    HvVmWriteChecked(VMCS_GUEST_CR4, cr4 & ~CR4_VMXE);
     HvVmWriteChecked(VMCS_GUEST_DR7, dr7);
 
     HvVmWriteChecked(VMCS_GUEST_DEBUGCTL,      __readmsr(MSR_IA32_DEBUGCTL));

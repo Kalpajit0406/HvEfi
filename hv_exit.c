@@ -673,15 +673,14 @@ static void HandleCrAccess(PVCPU vcpu, PGUEST_REGS regs) {
       break;
 
     case 4:
-      // FIXED0 already includes VMXE; forcing it again documents that a
-      // guest can never clear it while we are in VMX operation. The read
-      // shadow must track the new value or the guest would read stale
-      // bits that are not covered by the mask.
+      // In VMX non-root operation without nested virtualization, CR4.VMXE must
+      // remain 0 in VMCS_GUEST_CR4 and shadow. Guest attempts to set VMXE trap
+      // here via VMCS_CR4_GUEST_HOST_MASK instead of raising hardware #GP(0).
       cur = (*gprSlot | __readmsr(MSR_IA32_VMX_CR4_FIXED0)) &
             __readmsr(MSR_IA32_VMX_CR4_FIXED1);
-      cur |= CR4_VMXE;
+      cur &= ~CR4_VMXE;
       HvVmWriteLog(VMCS_GUEST_CR4, cur);
-      HvVmWriteLog(VMCS_CR4_READ_SHADOW, cur & ~CR4_VMXE);
+      HvVmWriteLog(VMCS_CR4_READ_SHADOW, cur);
       break;
 
     case 8:
@@ -1059,8 +1058,8 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
 
     __vmx_vmwrite(VMCS_GUEST_CR3, 0);
 
-    // CR4: minimum required by FIXED0
-    __vmx_vmwrite(VMCS_GUEST_CR4, __readmsr(MSR_IA32_VMX_CR4_FIXED0));
+    // CR4: minimum required by FIXED0, excluding VMXE
+    __vmx_vmwrite(VMCS_GUEST_CR4, __readmsr(MSR_IA32_VMX_CR4_FIXED0) & ~CR4_VMXE);
     __vmx_vmwrite(VMCS_CR4_READ_SHADOW, 0);
 
     // EFER: clear LMA and LME (real mode, not long mode)
