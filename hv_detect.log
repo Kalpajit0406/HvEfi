@@ -1,0 +1,138 @@
+=================================================================
+[*] HvEfi Hypervisor Residency & VMCALL Detector (Lab Edition)
+=================================================================
+[+] Configured Lab Ticket (32 bytes):
+    01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 
+[+] Derived BootMagic: 0xF869878B883CC167
+
+[*] System Processor Count: 16
+
+[*] Step 1: Testing CPUID Canary (0x13371337)...
+    [CPU 00] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 01] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 02] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 03] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 04] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 05] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 06] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 07] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 08] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 09] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 10] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 11] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 12] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 13] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 14] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 15] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+[*] Canary Summary: 0 / 16 CPUs running under VMX
+
+[*] Step 2: Probing VMCALL DETECT across all CPUs...
+    [CPU 00] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 01] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 02] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 03] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 04] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 05] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 06] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 07] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 08] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 09] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 10] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 11] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 12] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 13] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 14] VMCALL faulted with #UD (Bare metal / Not virtualized)
+    [CPU 15] VMCALL faulted with #UD (Bare metal / Not virtualized)
+[-] Hypervisor was NOT detected via VMCALL.
+=================================================================
+[*] HvEfi Hypervisor Residency & VMCALL Detector (Lab Edition)
+=================================================================
+[+] Configured Lab Ticket (32 bytes):
+    01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 
+[+] Derived BootMagic: 0xF869878B883CC167
+
+[*] System Processor Count: 16
+
+[*] Step 1: Testing CPUID Canary (0x13371337)...
+    [CPU 00] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 01] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 02] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 03] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 04] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 05] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 06] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 07] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 08] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 09] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 10] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 11] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 12] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 13] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 14] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 15] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+[*] Canary Summary: 0 / 16 CPUs running under VMX
+
+[*] Step 2: Probing VMCALL DETECT across all CPUs...
+    [CPU 00] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 01] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 02] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 03] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 04] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 05] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 06] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 07] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 08] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 09] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 10] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 11] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 12] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 13] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 14] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 15] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+[-] Hypervisor was NOT detected via VMCALL.
+=================================================================
+[*] HvEfi Hypervisor Residency & VMCALL Detector (Lab Edition)
+=================================================================
+[+] Configured Lab Ticket (32 bytes):
+    01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F 20 
+[+] Derived BootMagic: 0xF869878B883CC167
+
+[*] System Processor Count: 16
+
+[*] Step 1: Testing CPUID Canary (0x13371337)...
+    [CPU 00] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 01] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 02] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 03] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 04] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 05] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 06] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 07] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 08] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 09] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 10] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 11] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 12] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 13] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 14] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+    [CPU 15] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x00000000)
+[*] Canary Summary: 0 / 16 CPUs running under VMX
+
+[*] Step 2: Probing VMCALL DETECT across all CPUs...
+    [CPU 00] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 01] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 02] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 03] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 04] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 05] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 06] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 07] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 08] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 09] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 10] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 11] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 12] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 13] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 14] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+    [CPU 15] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)
+[-] Hypervisor was NOT detected via VMCALL.
