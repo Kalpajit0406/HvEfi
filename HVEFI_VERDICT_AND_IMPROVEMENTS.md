@@ -472,6 +472,27 @@ Ahead of bare-metal transition, the specific firmware architecture of the target
   3. **Clean Storage Closure**: All filesystem handles on the USB ESP are flushed and closed before `StartImage` is entered.
   4. **Production Deployment**: Recompiled both `HvEfi.efi` and `HvBoot.efi` cleanly in EDK2, patched provisioning sentinels via `patch_sentinels.py`, deployed to `D:\EFI\Boot\HvBoot.efi`, `D:\EFI\Boot\BOOTX64.EFI`, and `D:\EFI\Boot\hvcore.efi`, with `hvcfg` confirmed at `'F'`.
 
+### 5.6. Dell Dual-NVMe Chainload Resolution: Dynamic Partition Resolution & BCD LoadOptions Preservation
+* **Primary Evidence File**: `D:\EFI\Boot\hvefi.log` (Receipt trailing at `HVEFI CHAIN WIN fs start`)
+* **Target Environment**: Physical Dell G15 5530, Intel Core i5-13450HX, Dual-NVMe Topology (Disk 0: non-Windows ESP, Disk 1: SK hynix NVMe Windows ESP `W:`, Disk 2: USB `D:`).
+* **Failure Symptom**: After selecting the USB drive from the F12 boot menu, all 16 cores entered VMX root mode, authenticated VMCALL probe passed (`HVEFI VMCALL SELFTEST PASS`), but the system hung at the Dell logo immediately after logging `HVEFI CHAIN WIN fs start`.
+* **Root Cause Decoded**:
+  1. **Short-Form Device Path Failure in Dell UEFI DXE Core**:
+     Dell's InsydeH2O UEFI BIOS only resolves short-form media device paths (`HD(1,GPT,...)`) within its BDS boot manager loop, not inside `gBS->LoadImage()`. In `HvBootTryChainSlot`, Attempt 1 called `LoadImage(path)`, returning `EFI_NOT_FOUND` (`0x800000000000000E`).
+  2. **Stale ESP Handle on USB Boot**:
+     Attempt 2 called `HvBootBuildFilePath(EspHandle, HV_BOOT_WINDOWS_PATH)`. When booting from USB, `EspHandle` was the USB drive (`D:`), which does NOT contain `\EFI\Microsoft\Boot\bootmgfw.efi`. Attempt 2 returned `EFI_NOT_FOUND`.
+     `HvBootTryChainSlot` failed on all NVRAM slots and discarded the 136-byte BCD configuration parameters (`BCDOBJECT={9dea862c-5cdd-4e70-acc1-f32b344d4795}`).
+  3. **Unenlightened Launch Without `LoadOptions`**:
+     `HvBootChainloadWindows` fell back to Step 3 (filesystem walk). Step 3 located `bootmgfw.efi` on `W:`, but called `HvBootStartWindows(winImage)` **without `LoadOptions`** (`LoadOptions == NULL`, `LoadOptionsSize == 0`).
+     Without `BCDOBJECT` and partition target hints in `LoadOptions`, `bootmgfw.efi` on dual-NVMe OEM systems entered interactive device discovery, which stalled/froze while the console was still owned by the firmware splash screen.
+     (In contrast, when `HvBoot` was executed from `W:` via `memtest.efi`, `EspHandle` was `W:`, `Attempt 2` succeeded, `LoadOptions` were assigned, and `bootmgfw.efi` smoothly executed through `ExitBootServices`).
+* **Architectural Resolution Implemented (Commit `3aff210`)**:
+  1. **Dynamic Partition Matching (`HvBootFindPartitionByHdNode`)**: Walks all system device paths and matches the target partition handle by comparing the 16-byte partition GUID `Signature` from `HARDDRIVE_DEVICE_PATH`.
+  2. **Filesystem Fallback (`HvBootFindWindowsEspHandle`)**: Scans all `SimpleFileSystem` handles to discover the real partition hosting `\EFI\Microsoft\Boot\bootmgfw.efi`.
+  3. **Canonical Path Loading**: Builds the canonical full device path from the discovered partition handle, ensuring `LoadImage` succeeds directly on Dell firmware.
+  4. **Strict `LoadOptions` Preservation**: Assigns the native 136-byte `BCDOBJECT` `LoadOptions` in both `HvBootTryChainSlot` and Step 3 (`HvBootGetWindowsLoadOptions`), ensuring Windows Boot Manager always receives its native boot configuration regardless of the chainload path.
+  5. **Production Deployment**: Recompiled both `HvEfi.efi` and `HvBoot.efi`, patched sentinels via `patch_sentinels.py`, and deployed to `D:\EFI\Boot\HvBoot.efi`, `D:\EFI\Boot\BOOTX64.EFI`, and `D:\EFI\Boot\hvcore.efi` with `hvcfg = 'F'`.
+
 ---
 
 ## 6. Next Steps for Production Hardening
