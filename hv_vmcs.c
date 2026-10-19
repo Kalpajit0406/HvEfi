@@ -308,18 +308,14 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     HvVmWriteChecked(VMCS_PF_ERROR_CODE_MASK,  0);
     HvVmWriteChecked(VMCS_PF_ERROR_CODE_MATCH, 0);
     HvVmWriteChecked(VMCS_CR3_TARGET_COUNT,    0);
-    // CR0 mask owns PE and PG so the exit handler can track real-mode ↔
-    // long-mode transitions during INIT-SIPI AP bringup. In steady state
-    // (all CPUs in long mode, PE=1 PG=1), no CR0 write changes either bit,
-    // so the mask adds zero exits to normal operation.
-    HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, CR0_PE | CR0_PG);
-    // CR4's mask MUST own VMXE (bit 13). A guest read of CR4 returns the read
-    // shadow only for bits set in the mask, so leaving the mask at 0 made
-    // VMCS_CR4_READ_SHADOW dead and handed the guest the real CR4 — with
-    // VMXE=1, the single loudest VT-x tell. The read shadow below clears VMXE,
-    // and only a write that actually changes bit 13 now causes an exit
-    // (handled in hv_exit.c); every other CR4 bit stays guest-owned and free.
-    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE);
+    // Unrestricted guest is enabled (PROC2_UNRESTRICTED_GUEST).
+    // Zero CR0 and CR4 guest/host masks so the OS AP bringup trampoline can
+    // transition natively from real mode (PE=0, PG=0) to protected mode (PE=1)
+    // and long mode (PG=1) without trapping every CR write into root mode.
+    // Zeroing these masks matches all reference Type-1 hypervisors (HyperPlatform,
+    // SimpleVisor, hvpp, ksm, Bareflank) and eliminates the AP trampoline stall.
+    HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, 0);
+    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, 0);
     HvVmWriteChecked(VMCS_CR0_READ_SHADOW,     cr0);
     HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4 & ~CR4_VMXE);
 

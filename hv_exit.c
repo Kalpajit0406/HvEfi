@@ -976,6 +976,14 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     break;
 
   case EXIT_REASON_SIPI: {
+    UINT64 act = 0;
+    __vmx_vmread(VMCS_GUEST_ACTIVITY_STATE, &act);
+    if (act != 3) {
+      // Per Intel SDM Vol 3C §25.2: SIPI is only accepted when in wait-for-SIPI state (activity 3).
+      // If the AP is already active, ignore redundant/second SIPIs.
+      break;
+    }
+
     UINT64 qual = 0;
     __vmx_vmread(VMCS_EXIT_QUALIFICATION, &qual);
     UINT64 vector = qual & 0xFF;
