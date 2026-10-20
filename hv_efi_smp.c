@@ -659,45 +659,10 @@ NTSTATUS HvSmpVirtualizeAllProcessors(void) {
     // is distinguishable from NULL.
     VirtualizeCpuCallback((PVOID)(UINTN)(bspHandle + 1));
 
-    // If the BSP itself failed to launch, skip the APs: the count check below
-    // triggers the rollback path regardless, and attempting AP bring-up would
-    // only burn the 2 s timeout (plus a VMXON/VMLAUNCH cycle per AP) for nothing.
-    if (g_Hv.VcpuCount > 1 && (UINT32)g_VmxonSuccess > 0) {
-        // Dispatch each AP individually via StartupThisAP so the handle is
-        // passed explicitly as context — WhoAmI is broken on the Dell G15
-        // firmware and GetProcessorInfo reports IDs that do not match CPUID.
-        for (UINTN h = 0; h < (UINTN)g_Hv.VcpuCount; h++) {
-            if (h == (UINTN)bspHandle) continue;
-            EFI_STATUS st = gEfiMp->StartupThisAP(
-                gEfiMp,
-                ApVirtualizeCallback,
-                h,                              // ProcessorNumber
-                NULL,                           // WaitEvent (blocking)
-                2000000,                        // 2 s timeout per AP (30 s budget across 15 APs vs 120 s watchdog)
-                (PVOID)(UINTN)(h + 1),          // handle encoded as h+1
-                NULL                            // Finished
-            );
-            if (EFI_ERROR(st)) {
-                EfiFatal("StartupThisAP(%u): %r\n", (unsigned)h, st);
-            }
-        }
-    }
-
-    // Compute target VCPU count taking exclusion mask into account
-    UINT32 targetCount = g_Hv.VcpuCount;
-    if (g_Mailbox != NULL && HvMailboxValid(g_Mailbox)) {
-        UINT64 mask = HvMailboxCoreExclusionMaskGet(g_Mailbox);
-        if (mask != 0) {
-            UINT32 excluded = 0;
-            for (UINT32 k = 0; k < g_Hv.VcpuCount; k++) {
-                if (mask & (1ULL << k)) excluded++;
-            }
-            if (excluded < targetCount) {
-                targetCount -= excluded;
-            }
-        }
-    }
-    g_Hv.TargetVcpuCount = targetCount;
+    // Branch B: BSP-only virtualization (APs left native in DXE, miniSVM-style)
+    // Skip StartupThisAP loop; APs remain in un-virtualized firmware state.
+    g_Hv.VcpuCount = 1;
+    g_Hv.TargetVcpuCount = 1;
 
     // Every CPU that ran recorded its APIC ID at entry: the runtime VCPU
     // lookup can use the APIC-ID table for partial-launch devirt too.

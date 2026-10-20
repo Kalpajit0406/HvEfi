@@ -248,8 +248,9 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // (no TRUE variant MSR exists for secondary proc-based controls)
     // Step 0: VPID OFF (clear PROC2_ENABLE_VPID)
     UINT32 procCtls2 = AdjustControls(
-        PROC2_ENABLE_RDTSCP |
-        PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES,
+        PROC2_ENABLE_EPT | PROC2_ENABLE_RDTSCP |
+        PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES |
+        PROC2_UNRESTRICTED_GUEST,
         MSR_IA32_VMX_PROCBASED_CTLS2);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS2, procCtls2);
 
@@ -317,8 +318,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // Step 0: VPID disabled (field written as 0)
     HvVmWriteChecked(VMCS_VPID, 0);
 
-    // Branch A: EPT OFF (EPT pointer = 0)
-    HvVmWriteChecked(VMCS_EPT_PTR, 0);
+    // Step 0: EPT ON (1:1 identity map)
+    HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer);
 
     // VMCS link pointer = -1 (no shadow VMCS)
     HvVmWriteChecked(VMCS_GUEST_VMCS_LINK_PTR, (UINT64)-1);
