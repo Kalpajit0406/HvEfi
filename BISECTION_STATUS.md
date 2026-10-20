@@ -23,7 +23,7 @@ A controlled, single-variable hardware bisection protocol was initiated from the
 | **Baseline (Pre-Bisect)** | Masked `CR4.VMXE`, 1:1 Identity EPT, CPUID Leaf 1 masked, 16 CPUs | `bbbe115` | `receipts/dell_baremetal_b2_full_bringup_receipt.log` | **HANG** at `slot start` |
 | **Step 0 (Minimal Config)** | EPT: ON (1:1), CPUID: Passthrough, MSR Bitmap: Empty, TSC Offset: OFF, VPID: OFF, CR Masks: 0 | `db85b55` | [`receipts/bisect_step0_hang.log`](file:///F:/HvEfi/receipts/bisect_step0_hang.log) | **HANG** at `slot start` (`EXITS total=2392`, `proc=2483052914`, `proc2=1052810`) |
 | **Branch A (EPT OFF)** | Step 0 + `PROC2_ENABLE_EPT = 0` (guest-phys = host-phys), `PROC2_UNRESTRICTED_GUEST = 0`, `VMCS_EPT_PTR = 0` | `c94d251` | [`receipts/bisect_branchA_hang.log`](file:///F:/HvEfi/receipts/bisect_branchA_hang.log) | **HANG** at `slot start` (`EXITS total=2766`, `proc=2483052914`, `proc2=1052680`) |
-| **Branch B (BSP-Only)** | Step 0 + BSP-only virtualization (APs left native in DXE) | *(Pending)* | `receipts/bisect_branchB_<result>.log` | *Scheduled next* |
+| **Branch B (BSP-Only)** | Step 0 + BSP-only virtualization (APs left native in DXE) | `40935b0` | `receipts/bisect_branchB_<result>.log` | *Staged on USB D: & pending Dell boot* |
 
 ---
 
