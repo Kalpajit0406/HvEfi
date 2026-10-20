@@ -12,6 +12,45 @@
 #include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
 #include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
 
+unsigned char __inbyte(unsigned short Port);
+void __outbyte(unsigned short Port, unsigned char Data);
+
+static void RawUartWrite(char c) {
+  UINT32 timeout = 10000;
+  while ((__inbyte(0x3FD) & 0x20) == 0 && --timeout);
+  __outbyte(0x3F8, (unsigned char)c);
+}
+
+static void RawUartPrint(const char *str) {
+  while (*str) {
+    if (*str == '\n') RawUartWrite('\r');
+    RawUartWrite(*str++);
+  }
+}
+
+static void RawUartPrintHex64(UINT64 val) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (int i = 60; i >= 0; i -= 4) {
+    RawUartWrite(hex[(val >> i) & 0xF]);
+  }
+}
+
+static void RawUartPrintNum(UINT32 val) {
+  char buf[12];
+  int i = 0;
+  if (val == 0) {
+    RawUartWrite('0');
+    return;
+  }
+  while (val > 0) {
+    buf[i++] = (char)('0' + (val % 10));
+    val /= 10;
+  }
+  while (--i >= 0) {
+    RawUartWrite(buf[i]);
+  }
+}
+
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
 static void AdvanceGuestRip(void) {
@@ -201,7 +240,31 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
 
   UINT32 leaf = (UINT32)regs->Rax;
   UINT32 subleaf = (UINT32)regs->Rcx;
+
+  RawUartPrint(" [CPUID] leaf=0x");
+  RawUartPrintHex64(leaf);
+  RawUartPrint(" subleaf=0x");
+  RawUartPrintHex64(subleaf);
+  RawUartPrint("\n");
   UINT32 out[4] = {0, 0, 0, 0};
+
+  // Bare metal replica: mask hypervisor synthetic leaves (0x40000000 - 0x400000FF)
+  // On bare metal Intel hardware, leaves > max basic leaf return max basic leaf data.
+  // In VMware, 0x40000000 returns "Microsoft Hv", tricking Windows into using Hyper-V
+  // synthetic timers without an enlightened hypervisor to service their interrupts.
+  if (leaf >= 0x40000000 && leaf <= 0x400000FF) {
+    int maxLeaf[4] = {0};
+    __cpuid(maxLeaf, 0);
+    int r[4] = {0};
+    __cpuidex(r, maxLeaf[0], (int)subleaf);
+    regs->Rax = (UINT32)r[0];
+    regs->Rbx = (UINT32)r[1];
+    regs->Rcx = (UINT32)r[2];
+    regs->Rdx = (UINT32)r[3];
+    CpuidTimingPad(entryTsc);
+    AdvanceGuestRip();
+    return TRUE;
+  }
 
   // Canary leaf 0x13371337: Zero-privilege Ring 3 hypervisor residency proof.
   // Bypasses ticket/VMCALL requirements and allows instant per-core verification.
@@ -553,6 +616,12 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   UINT32 msr = (UINT32)regs->Rcx;
   UINT64 val = ((UINT64)(UINT32)regs->Rdx << 32) | (UINT32)regs->Rax;
 
+  RawUartPrint(" [WRMSR] msr=0x");
+  RawUartPrintHex64(msr);
+  RawUartPrint(" val=0x");
+  RawUartPrintHex64(val);
+  RawUartPrint("\n");
+
   switch (msr) {
   case MSR_IA32_FEATURE_CONTROL:
     break;
@@ -583,6 +652,7 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   // (see the read side above).
   default:
     if (!HvAsmWriteMsrSafe(msr, val)) {
+      RawUartPrint(" [WRMSR SAFE WRITE FAILED -> INJECTING GP]\n");
       HvInjectGp();
       return;
     }
@@ -770,6 +840,14 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   UINT64 rsp = 0;
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
   __vmx_vmread(VMCS_GUEST_RSP, &rsp);
+
+  RawUartPrint("[VMEXIT] cpu=");
+  RawUartPrintNum(vcpu ? vcpu->ProcessorIndex : 0);
+  RawUartPrint(" reason=");
+  RawUartPrintNum(reason);
+  RawUartPrint(" rip=0x");
+  RawUartPrintHex64(rip);
+  RawUartPrint("\n");
 
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 

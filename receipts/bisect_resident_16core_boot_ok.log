@@ -1,0 +1,48 @@
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[+] Step 5: Ticket read from the mailbox
+[+] Step 6: Session keys derived
+[+] Step 7: Decoy pages allocated
+[+] Step 8: VMX initialized (16 CPUs, EPT ready)
+[+]   EFI image: 66 pages at 0xD51A000 (executable hide)
+[+] Step 9: 1209 pages to hide
+[+] Step 10: EPT hiding complete
+[+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
+[+] Step 13: Secrets wiped from g_Hv
+[HvReceipt] CORE stage=13
+[HvReceipt] CORE deta[VMEXIT] cpu=0 reason=10 rip=0x000000000FABC13E
+[HvReceipt] EPT units=1
+[HvReceipt] EPT ranges=5
+[HvReceipt] EPT maxphys_lo=1073741824
+[HvReceipt] EPT maxphys_hi=2
+[HvReceipt] EPT splits=3
+[HvReceipt] EPT gb=512
+[HvReceipt] VMCS pin=22
+[HvReceipt] VMCS proc=2483052914
+[HvReceipt] VMCS exit=4157435
+[HvReceipt] VMCS proc2=1052810
+[HvReceipt] EXITS total=36
+[HvReceipt] FULL DONE
+[HvReceipt] BOOT DONE
+[HvBoot] Probing hypervisor via authenticated VMCALL...
+[+] [HvBoot] VMCALL DETECT SUCCEED[VMEXIT] cpu=0 reason=10 rip=0x000000000FABC13E
+[HvReceipt] VMCALL DETECT SUCCESS
+[+] [HvBoot] Session Derived! SessionMagic = 0x4F8563767E41AFBF
+[+] [HvBoot] Hypervisor Status: 0x0000000000010010 (vCPUs: 16, Running: 1)
+[HvReceipt] VMCALL STATUS vcpus=16
+[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
+[HvReceipt] VMCALL SELFTEST PASS
+[HvReceipt] NOP VMCALL
+[HvReceipt] NOP st hi=505996300
+[HvReceipt] HYP[VMEXIT] cpu=0 reason=10 rip=0x000000000FABC13E
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WIN slot start

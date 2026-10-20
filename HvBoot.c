@@ -1756,12 +1756,8 @@ HvBootMain (
         UINT64 nop2 = VmcallFn(bootMagic, 0 /* DETECT */, 0, 0, 0, 0);
         HvBootReceiptNum (vol, "NOP st hi", (UINT32)(nop2 >> 32));
 
-        // Branch C: devirtualize BSP before chainloading bootmgfw.
-        HvBootReceiptLine (vol, "PRE UNLOAD");
-        UINT64 unloadMac = HvMacUnload(key0, key1);
-        UINT64 unloadSt = VmcallFn(sessionMagic, 5 /* HV_HYPERCALL_UNLOAD */, 0, 0, unloadMac, 0);
-        HvBootReceiptLine (vol, "POST UNLOAD");
-        HvBootReceiptNum (vol, "VMCALL UNLOAD st", (UINT32)unloadSt);
+        // Hypervisor stays RESIDENT (testing Windows boot under virtualization)
+        HvBootReceiptLine (vol, "HYPERVISOR RESIDENT");
       } else {
         if (nonce == (UINT64)-2 || nonce == HV_STATUS_NOT_OURS) {
           DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED: NOT_OURS (ticket mismatch or unauthenticated)\n"));

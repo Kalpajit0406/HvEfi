@@ -335,12 +335,18 @@ HvAsmSwitchToGuest PROC
     ; the host CR3 (DXE precondition above), so switching RSP first leaves no
     ; window where an interrupt would use a stack unmapped under the current
     ; CR3. RSP is abandoned here — this never returns.
+    ;
+    ; In 64-bit mode, IRETQ to CPL 0 with SS=0 (standard in UEFI DXE) triggers
+    ; #GP(0) per Intel SDM Vol 2A because SS cannot be NULL on IRET to non-CPL3.
+    ; Instead, restore guest RFLAGS via push/popfq, then execute a 64-bit far return
+    ; (rex_w retf, 48h CBh) to guest CS:RIP, cleanly restoring guest RSP.
     mov     rsp, rdx                ; guest stack (still host CR3: safe)
     mov     cr3, rcx                ; guest address space
     push    r10                     ; guest RFLAGS
-    push    r8                      ; guest CS selector
-    push    r9                      ; guest RIP
-    iretq                           ; resume guest with its RFLAGS
+    popfq                           ; restore guest RFLAGS
+    push    r8                      ; guest CS selector (qword)
+    push    r9                      ; guest RIP (qword)
+    db      48h, 0CBh               ; rex_w retf (pops 64-bit RIP, then pops 64-bit CS)
 HvAsmSwitchToGuest ENDP
 
 ; ---------------------------------------------------------------------------
