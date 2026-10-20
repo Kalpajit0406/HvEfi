@@ -241,11 +241,6 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   UINT32 leaf = (UINT32)regs->Rax;
   UINT32 subleaf = (UINT32)regs->Rcx;
 
-  RawUartPrint(" [CPUID] leaf=0x");
-  RawUartPrintHex64(leaf);
-  RawUartPrint(" subleaf=0x");
-  RawUartPrintHex64(subleaf);
-  RawUartPrint("\n");
   UINT32 out[4] = {0, 0, 0, 0};
 
   // Bare metal replica: mask hypervisor synthetic leaves (0x40000000 - 0x400000FF)
@@ -280,8 +275,12 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   // Every leaf — including out-of-range leaves — is answered by running
   // real hardware CPUID and memoising it. On bare metal, Intel CPUs return the
   // highest standard leaf data (with hardware EBX/ECX/EDX) for unmodeled leaves.
-  // Step 0: pure passthrough, zero masking
   HvCpuidLookup(vcpu, leaf, subleaf, out);
+
+  if (leaf == 1) {
+    out[2] &= ~(1u << 5);    // mask VMX (ECX bit 5) to prevent nested virtualization conflict
+    out[2] &= ~(1u << 31);   // hypervisor present
+  }
 
   regs->Rax = out[0];
   regs->Rbx = out[1];
@@ -616,11 +615,6 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   UINT32 msr = (UINT32)regs->Rcx;
   UINT64 val = ((UINT64)(UINT32)regs->Rdx << 32) | (UINT32)regs->Rax;
 
-  RawUartPrint(" [WRMSR] msr=0x");
-  RawUartPrintHex64(msr);
-  RawUartPrint(" val=0x");
-  RawUartPrintHex64(val);
-  RawUartPrint("\n");
 
   switch (msr) {
   case MSR_IA32_FEATURE_CONTROL:
@@ -841,13 +835,15 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
   __vmx_vmread(VMCS_GUEST_RSP, &rsp);
 
-  RawUartPrint("[VMEXIT] cpu=");
-  RawUartPrintNum(vcpu ? vcpu->ProcessorIndex : 0);
-  RawUartPrint(" reason=");
-  RawUartPrintNum(reason);
-  RawUartPrint(" rip=0x");
-  RawUartPrintHex64(rip);
-  RawUartPrint("\n");
+  if (reason != EXIT_REASON_CPUID && reason != EXIT_REASON_WRMSR) {
+    RawUartPrint("[VMEXIT] cpu=");
+    RawUartPrintNum(vcpu ? vcpu->ProcessorIndex : 0);
+    RawUartPrint(" reason=");
+    RawUartPrintNum(reason);
+    RawUartPrint(" rip=0x");
+    RawUartPrintHex64(rip);
+    RawUartPrint("\n");
+  }
 
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 

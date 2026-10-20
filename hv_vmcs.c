@@ -234,21 +234,20 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // Primary proc-based: enable secondary controls, MSR bitmaps, and TSC
     // offset. See HvDrv/hv_vmcs.c for the full rationale. Per-boot random
     // shift stored in g_Hv.TscBootOffset; no per-exit adjustment.
-    // Step 0: TSC offset OFF (clear PROC_BASED_USE_TSC_OFFSET)
     UINT32 procCtls = AdjustControls(
-        PROC_BASED_ACTIVATE_SECONDARY | PROC_BASED_USE_MSR_BITMAPS,
+        PROC_BASED_ACTIVATE_SECONDARY | PROC_BASED_USE_MSR_BITMAPS |
+        PROC_BASED_USE_TSC_OFFSET,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
-    HvVmWriteChecked(VMCS_TSC_OFFSET, 0);
+    HvVmWriteChecked(VMCS_TSC_OFFSET, (UINT64)g_Hv.TscBootOffset);
 
     // Secondary: EPT, VPID, RDTSCP, INVPCID, XSAVES, unrestricted guest.
     // Unrestricted guest is required for INIT-SIPI AP bringup: the OS sends
     // INIT-SIPI to wake APs, which must start in real mode (PE=0, PG=0).
     // Without unrestricted guest, the VMCS cannot hold real-mode state.
     // (no TRUE variant MSR exists for secondary proc-based controls)
-    // Step 0: VPID OFF (clear PROC2_ENABLE_VPID)
     UINT32 procCtls2 = AdjustControls(
-        PROC2_ENABLE_EPT | PROC2_ENABLE_RDTSCP |
+        PROC2_ENABLE_EPT | PROC2_ENABLE_VPID | PROC2_ENABLE_RDTSCP |
         PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES |
         PROC2_UNRESTRICTED_GUEST,
         MSR_IA32_VMX_PROCBASED_CTLS2);
@@ -315,8 +314,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // MSR bitmap — all zeros = pass through all MSRs (no VM-exit)
     HvVmWriteChecked(VMCS_MSR_BITMAP, vcpu->MsrBitmapPhysical.QuadPart);
 
-    // Step 0: VPID disabled (field written as 0)
-    HvVmWriteChecked(VMCS_VPID, 0);
+    // VPID - unique per vCPU (0 is invalid)
+    HvVmWriteChecked(VMCS_VPID, (UINT64)(vcpu->ProcessorIndex + 1));
 
     // Step 0: EPT ON (1:1 identity map)
     HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer);
