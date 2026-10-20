@@ -217,12 +217,8 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
   // Every leaf — including out-of-range leaves — is answered by running
   // real hardware CPUID and memoising it. On bare metal, Intel CPUs return the
   // highest standard leaf data (with hardware EBX/ECX/EDX) for unmodeled leaves.
+  // Step 0: pure passthrough, zero masking
   HvCpuidLookup(vcpu, leaf, subleaf, out);
-
-  if (leaf == 1) {
-    out[2] &= ~(1u << 5);    // mask VMX (ECX bit 5) to prevent nested virtualization conflict
-    out[2] &= ~(1u << 31);   // hypervisor present
-  }
 
   regs->Rax = out[0];
   regs->Rbx = out[1];

@@ -174,11 +174,8 @@ static void SetMsrBit(PUCHAR bitmap, UINT32 msr, BOOLEAN read, BOOLEAN write) {
 }
 
 static void FillMsrBitmap(PUCHAR bitmap) {
+    // Step 0: empty MSR bitmap (no EFER, no FEATURE_CONTROL interception)
     RtlZeroMemory(bitmap, PAGE_SIZE);
-    static const UINT32 kIntercepted[] = { HV_INTERCEPTED_MSRS };
-    for (int i = 0; i < (int)(sizeof(kIntercepted) / sizeof(kIntercepted[0])); i++)
-        SetMsrBit(bitmap, kIntercepted[i], TRUE, TRUE);
-    // Deliberate non-interceptions are documented in hv_msr_contract.h.
 }
 
 // ── VMX Initialize ──────────────────────────────────────────────────────────
