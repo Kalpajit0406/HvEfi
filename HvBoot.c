@@ -1750,6 +1750,13 @@ HvBootMain (
           DEBUG ((DEBUG_INFO, "[-] [HvBoot] HV_HYPERCALL_SELFTEST: FAILED (0x%lx)\n\n", selftest));
           HvBootReceiptStatus (vol, "VMCALL SELFTEST FAIL", (EFI_STATUS)selftest);
         }
+
+        // Branch C: devirtualize BSP before chainloading bootmgfw.
+        // If the Dell boots with this, VMX non-root during bootmgfw is the cause.
+        UINT64 unloadMac = HvMacUnload(key0, key1);
+        UINT64 unloadSt = VmcallFn(sessionMagic, 5 /* HV_HYPERCALL_UNLOAD */, 0, 0, unloadMac, 0);
+        DEBUG ((DEBUG_INFO, "[HvBoot] VMCALL UNLOAD st=0x%lx\n", unloadSt));
+        HvBootReceiptNum (vol, "VMCALL UNLOAD st", (UINT32)unloadSt);
       } else {
         if (nonce == (UINT64)-2 || nonce == HV_STATUS_NOT_OURS) {
           DEBUG ((DEBUG_INFO, "[-] [HvBoot] VMCALL DETECT FAILED: NOT_OURS (ticket mismatch or unauthenticated)\n"));

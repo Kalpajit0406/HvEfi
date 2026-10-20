@@ -26,7 +26,8 @@ Every test follows the bisection protocol: one change, one commit, one Dell bare
 | **Baseline (Pre-Bisect)** | Masked `CR4.VMXE`, 1:1 Identity EPT, CPUID Leaf 1 masked, 16 CPUs virtualized | `bbbe115` | `receipts/dell_baremetal_b2_full_bringup_receipt.log` | **`HANG`** | Stalls at `slot start`; infinite CPUID loop at Dell splash screen. |
 | **Step 0 (Minimal Config)** | Core virtualization only: EPT ON (1:1), CPUID pure passthrough, empty MSR bitmap, TSC offset OFF, VPID OFF, CR masks 0 | `db85b55` | [`receipts/bisect_step0_hang.log`](receipts/bisect_step0_hang.log) | **`HANG`** | Stalls at `slot start`; 2,392 VM exits; `proc2=1052810` (EPT bit 1 ON). |
 | **Branch A (EPT OFF)** | Step 0 + `PROC2_ENABLE_EPT = 0` (guest-phys = host-phys), `PROC2_UNRESTRICTED_GUEST = 0`, `VMCS_EPT_PTR = 0` | `c94d251` | [`receipts/bisect_branchA_hang.log`](receipts/bisect_branchA_hang.log) | **`HANG`** | Stalls at `slot start`; 2,766 VM exits; `proc2=1052680` (EPT bit 1 OFF). |
-| **Branch B (BSP-Only)** | Step 0 + EPT ON + BSP-only virtualization (APs 1–15 left native in DXE) | *(In Progress)* | `receipts/bisect_branchB_<result>.log` | *Pending compilation, flash & boot* | Expected `vcpus=1`; isolates AP lifecycle from BSP handoff. |
+| **Branch B (BSP-Only)** | Step 0 + EPT ON + BSP-only virtualization (APs 1–15 left native in DXE) | `e6e9923` | [`receipts/bisect_branchB_hang.log`](receipts/bisect_branchB_hang.log) | **`HANG`** | Stalls at `slot start`; 7,283 + 2,151 VM exits across two boots; `vcpus=1`, `proc2=1052810` (EPT ON). APs conclusively exonerated. |
+| **Branch C (UNLOAD before chain)** | Branch B + VMCALL UNLOAD devirtualizes BSP before StartImage(bootmgfw) | *(Staged)* | `receipts/bisect_branchC_<result>.log` | *Awaiting Dell reboot* | If boots: VMX non-root during bootmgfw is the cause. If hangs: hypervisor corrupted DXE state. |
 
 ---
 
@@ -40,86 +41,54 @@ Every test follows the bisection protocol: one change, one commit, one Dell bare
 - **Result**: The machine still froze at the identical location (`HVEFI CHAIN WIN slot start`) after 2,766 clean VM exits.
 - **Deduction**: EPT table generation, 2MB large page splitting, RAM range descriptor coalescing, and EPT memory attributes (WB/UC) have zero impact on the hang. EPT is 100% ruled out.
 
-### 3.2. Primary Suspect: AP Virtualization & OS SIPI Trampoline Handshake
-Because EPT is ruled out and the hang occurs when Windows Boot Manager transitions to kernel startup:
-1. **Firmware DXE Parking**:
-   - On the Dell InsydeH2O BIOS, APs 1–15 sit parked in a firmware loop (`mWaitLoop` / `Pause`) in DXE.
-   - HvEfi virtualizes all 15 APs via `StartupThisAP`. They enter VMX root mode, run `VMLAUNCH`, and return to firmware code **inside VMX non-root mode**.
-2. **The OS Trampoline Handshake**:
-   - When `bootmgfw.efi` launches the Windows kernel, it sends INIT-SIPI-SIPI to wake APs into a real-mode startup trampoline (`0x000N_0000`).
-   - In `hv_exit.c:1069`, the SIPI handler resets the AP to 16-bit real mode and clears `ENTRY_CTRL_IA32E_MODE_GUEST`.
-   - As the AP executes the OS trampoline, it switches CPU modes: real mode $\to$ protected mode $\to$ 64-bit long mode.
-   - Because `VMCS_CR0_GUEST_HOST_MASK` is 0, `MOV CR0` does not cause a VM exit.
-   - When the AP takes its first VM-exit in long mode (CPUID, interrupt, or MSR read), `VMCS_GUEST_EFER.LMA` is 1, but `VMCS_ENTRY_CONTROLS.ENTRY_CTRL_IA32E_MODE_GUEST` may still be 0.
-   - Per Intel SDM Vol 3C §26.3.1.5, this triggers `VM-entry failure: invalid guest state` (`VMENTRY_FAIL_GUEST_STATE`), crashing the AP.
-   - The BSP sits in a spinlock / barrier awaiting AP check-in, causing the hang at the Dell logo.
+### 3.2. AP Virtualization is Conclusively Exonerated
+- In **Branch B**, all 15 APs were left completely native (un-virtualized) in Dell DXE firmware.
+  - `g_Hv.VcpuCount = 1` and `g_Hv.TargetVcpuCount = 1`.
+  - Only the BSP entered VMX root mode and ran in VMX non-root.
+  - No `StartupThisAP` calls were issued; no AP touched VMX at all.
+- **Result**: The machine still froze at `HVEFI CHAIN WIN slot start` after 7,283 and 2,151 VM exits across two boots. Receipt confirmed `vcpus=1`.
+- **Deduction**: The SIPI trampoline theory (Section 3.2 original) is disproven. APs are 100% ruled out. The hang is **BSP-only**.
+
+### 3.3. Primary Suspect: VMX Non-Root Mode During bootmgfw.efi Execution
+With EPT and APs both ruled out, the remaining variable is whether the BSP running in VMX non-root mode during `bootmgfw.efi` (and subsequently `winload.efi`) is itself the cause. Branch C tests this by devirtualizing the BSP (VMCALL UNLOAD) immediately before `gBS->StartImage(bootmgfw)`.
+
+Possible mechanisms for the hang in VMX non-root:
+1. **CR4.VMXE clearing**: With CR4 guest/host mask = 0, bootmgfw can clear CR4.VMXE, causing VMRESUME to fail. The devirt path should recover, but may not if firmware state is corrupted.
+2. **Interrupt delivery timing**: Pin-based controls = 22 means external-interrupt exiting is ON. The deferred injection path (interrupt-window exiting) may interact poorly with InsydeH2O's SMM or the Intel VTd DMA teardown.
+3. **VMCS host state stale after ExitBootServices**: The VMCS host GDT/IDT/selectors were set during DXE but the OS reclaims that memory after EBS.
 
 ---
 
-## 4. Current Codebase Condition (Branch B Implementation)
+## 4. Current Codebase Condition (Branch C Implementation)
 
-The codebase has been prepared for **Branch B (BSP-Only Virtualization)** with the following exact changes:
+Branch C = Branch B (BSP-only) + VMCALL UNLOAD before chainloading bootmgfw.
 
-### 4.1. `hv_vmcs.c` (Lines 250–255, 321–323)
-- Restored `PROC2_ENABLE_EPT` and `PROC2_UNRESTRICTED_GUEST` to Step 0 baseline.
-- Restored `HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer)`.
+### 4.1. `hv_efi_smp.c` (Lines 662–666, unchanged from Branch B)
+- AP bringup loop bypassed. `g_Hv.VcpuCount = 1`, `g_Hv.TargetVcpuCount = 1`.
+- Only the BSP enters VMX root mode.
 
-### 4.2. `hv_efi_smp.c` (Lines 662–666)
-- Bypassed the AP bringup loop (`StartupThisAP` calls skipped for APs 1–15).
-- Assigned `g_Hv.VcpuCount = 1` and `g_Hv.TargetVcpuCount = 1`.
-- APs 1–15 remain completely native and un-virtualized in Dell DXE firmware.
-- Only the BSP (CPU 0) enters VMX root mode and runs virtualized.
+### 4.2. `HvBoot.c` (after SELFTEST, before chainload)
+- Added authenticated `VMCALL UNLOAD` (hypercall 0x0005) using `HvMacUnload(key0, key1)`.
+- On success (`st=0`), the BSP is devirtualized: VMXOFF executed, guest state restored, CPU continues natively.
+- Receipt line: `VMCALL UNLOAD st=<value>`.
+- The chainload (`gBS->StartImage(bootmgfw)`) now runs on a native (non-VMX) BSP.
 
 ---
 
-## 5. Detailed Next Steps
+## 5. Detailed Next Steps — Branch C
 
-```mermaid
-flowchart TD
-    A[Build Branch B via build_hvefi.bat] --> B[Verify Binaries & Required Contract Strings]
-    B --> C[Patch Sentinels via patch_sentinels.py]
-    C --> D[Stage hvcore.efi & HvBoot.efi to USB D: Drive]
-    D --> E[Arm D:\EFI\Boot\hvefi.log with HVEFI RETRY]
-    E --> F[Commit & Push Branch B to GitHub]
-    F --> G[Reboot Dell G15 via F12 USB Boot]
-    G --> H{Inspect hvefi.log Result}
-    H -->|BOOT-OK: Windows Desktop Reached| I[Culprit Confirmed: AP Lifecycle & SIPI Transition]
-    H -->|HANG: Frozen at slot start| J[Culprit Confirmed: BSP UEFI Handoff State]
-```
+Branch C is built, staged to `D:\EFI\Boot\`, and armed. Awaiting Dell reboot.
 
-### Step 5.1: Build Completion & Validation
-- Compile `HvEfi.efi` and `HvBoot.efi` using `build_hvefi.bat`.
-- Ensure post-build contract checks succeed:
-  - `"EPT hiding complete"`
-  - `"Step 1: VMX supported"`
-  - `"All %u CPUs virtualized"`
-  - Sentinel checks verified.
+### Step 5.1: Physical Dell G15 Boot
+- Power on Dell G15, press F12, select UEFI USB Drive.
+- Expected receipt signature: `VMCALL UNLOAD st=0` followed by `CHAIN WIN slot start`.
 
-### Step 5.2: Stage to Physical USB (`D:\`)
-- Run:
-  ```powershell
-  python patch_sentinels.py HvEfi.efi D:\EFI\Boot\hvcore.efi
-  python patch_sentinels.py HvBoot.efi D:\EFI\Boot\HvBoot.efi
-  Copy-Item D:\EFI\Boot\HvBoot.efi D:\EFI\Boot\BOOTX64.EFI -Force
-  ```
-- Verify:
-  - `D:\EFI\Boot\hvcfg` contains `'F'`.
-  - `D:\EFI\Boot\hvefi.log` contains fresh `HVEFI RETRY`.
-
-### Step 5.3: Git Commit and Push
-- Commit: `bisect(branchB): Step 0 with BSP-only virtualization (APs left native)`
-- Push to GitHub `origin/main` and verify `HEAD == origin/main`.
-
-### Step 5.4: Physical Dell G15 Boot
-- User powers on Dell G15, presses F12, and selects the UEFI USB Drive.
-- HvBoot initializes and chains into `hvcore.efi`.
-- Expected receipt signature: `HVEFI VMCALL STATUS vcpus=1`.
-
-### Step 5.5: Evaluation & Subsequent Action
-1. **If Branch B reaches Windows 11 Desktop (`BOOT-OK`)**:
-   - Proves beyond all doubt that the hypervisor core, EPT, VMCS baseline, memory layout, and BSP handoff are 100% correct.
-   - The bug is strictly isolated to AP bringup, AP DXE parking loop return, or the AP SIPI real-mode to 64-bit transition.
-   - Next action: Fix the AP mode sync in `hv_exit.c` and re-enable AP virtualization.
-2. **If Branch B still freezes at `slot start` (`HANG`)**:
-   - Proves the hang occurs on the BSP alone, independent of multi-processor synchronization.
-   - Next action: Bisect BSP handoff state (external interrupt delivery, LAPIC timer, GDT/TSS selector consistency, or UEFI memory map descriptors passed to `ExitBootServices`).
+### Step 5.2: Evaluation & Subsequent Action
+1. **If Branch C reaches Windows 11 Desktop (`BOOT-OK`)**:
+   - **Proves**: VMX non-root mode during `bootmgfw.efi` / `winload.efi` is the root cause.
+   - The hypervisor DXE bring-up is correct; the problem is that bootmgfw cannot tolerate running virtualized.
+   - **Next action**: Implement a proper ExitBootServices callback that devirtualizes all CPUs before the OS takes over, or move VMCALL UNLOAD into the EBS notification path.
+2. **If Branch C still freezes at `slot start` (`HANG`)**:
+   - **Proves**: The hypervisor corrupts some DXE/firmware state during its bringup that persists even after devirtualization.
+   - Possible causes: stale GDT/IDT from VMX host state, corrupted memory map, LAPIC timer state, or firmware data structures damaged by EPT page hiding.
+   - **Next action**: Branch D — skip VMX entirely (load the driver but return immediately without VMLAUNCH) to confirm that mere DXE image loading is not the cause.
