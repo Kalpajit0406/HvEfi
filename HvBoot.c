@@ -1751,11 +1751,16 @@ HvBootMain (
           HvBootReceiptStatus (vol, "VMCALL SELFTEST FAIL", (EFI_STATUS)selftest);
         }
 
+        // Diagnostic: verify VMCALL still works after SELFTEST
+        HvBootReceiptLine (vol, "NOP VMCALL");
+        UINT64 nop2 = VmcallFn(bootMagic, 0 /* DETECT */, 0, 0, 0, 0);
+        HvBootReceiptNum (vol, "NOP st hi", (UINT32)(nop2 >> 32));
+
         // Branch C: devirtualize BSP before chainloading bootmgfw.
-        // If the Dell boots with this, VMX non-root during bootmgfw is the cause.
+        HvBootReceiptLine (vol, "PRE UNLOAD");
         UINT64 unloadMac = HvMacUnload(key0, key1);
         UINT64 unloadSt = VmcallFn(sessionMagic, 5 /* HV_HYPERCALL_UNLOAD */, 0, 0, unloadMac, 0);
-        DEBUG ((DEBUG_INFO, "[HvBoot] VMCALL UNLOAD st=0x%lx\n", unloadSt));
+        HvBootReceiptLine (vol, "POST UNLOAD");
         HvBootReceiptNum (vol, "VMCALL UNLOAD st", (UINT32)unloadSt);
       } else {
         if (nonce == (UINT64)-2 || nonce == HV_STATUS_NOT_OURS) {
