@@ -248,21 +248,9 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // (no TRUE variant MSR exists for secondary proc-based controls)
     // Step 0: VPID OFF (clear PROC2_ENABLE_VPID)
     UINT32 procCtls2 = AdjustControls(
-        PROC2_ENABLE_EPT | PROC2_ENABLE_RDTSCP |
-        PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES |
-        PROC2_UNRESTRICTED_GUEST,
+        PROC2_ENABLE_RDTSCP |
+        PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES,
         MSR_IA32_VMX_PROCBASED_CTLS2);
-    if (!(procCtls2 & PROC2_ENABLE_EPT)) {
-        EfiFatal("HvVmcs: PROC2_ENABLE_EPT cleared by AdjustControls on CPU %u — "
-                 "EPT not available, refusing VMCS setup\n", vcpu->ProcessorIndex);
-        return STATUS_NOT_SUPPORTED;
-    }
-    if (!(procCtls2 & PROC2_UNRESTRICTED_GUEST)) {
-        EfiFatal("HvVmcs: PROC2_UNRESTRICTED_GUEST unavailable on CPU %u — "
-                 "cannot support OS AP bringup, refusing VMCS setup\n",
-                 vcpu->ProcessorIndex);
-        return STATUS_NOT_SUPPORTED;
-    }
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS2, procCtls2);
 
     // Exit controls: 64-bit host, save/load EFER/PAT.
@@ -329,8 +317,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // Step 0: VPID disabled (field written as 0)
     HvVmWriteChecked(VMCS_VPID, 0);
 
-    // EPT pointer
-    HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer);
+    // Branch A: EPT OFF (EPT pointer = 0)
+    HvVmWriteChecked(VMCS_EPT_PTR, 0);
 
     // VMCS link pointer = -1 (no shadow VMCS)
     HvVmWriteChecked(VMCS_GUEST_VMCS_LINK_PTR, (UINT64)-1);
