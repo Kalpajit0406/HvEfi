@@ -540,6 +540,14 @@ static void HandleRdmsr(PVCPU vcpu, PGUEST_REGS regs) {
   UNREFERENCED_PARAMETER(vcpu);
   UINT32 msr = (UINT32)regs->Rcx;
 
+  // Hyper-V synthetic MSR range (0x40000000 - 0x400000F0): real Intel silicon
+  // does not implement these MSRs. EAC and BattlEye probe this range; inject #GP(0)
+  // directly without executing an unmapped MSR read in host root mode.
+  if (msr >= 0x40000000 && msr <= 0x400000F0) {
+    HvInjectGp();
+    return;
+  }
+
   UINT64 val;
   switch (msr) {
   case MSR_IA32_FEATURE_CONTROL:
@@ -577,6 +585,11 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   UINT32 msr = (UINT32)regs->Rcx;
   UINT64 val = ((UINT64)(UINT32)regs->Rdx << 32) | (UINT32)regs->Rax;
 
+  // Hyper-V synthetic MSR range (0x40000000 - 0x400000F0):
+  if (msr >= 0x40000000 && msr <= 0x400000F0) {
+    HvInjectGp();
+    return;
+  }
 
   switch (msr) {
   case MSR_IA32_FEATURE_CONTROL:

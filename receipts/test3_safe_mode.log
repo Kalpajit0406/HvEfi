@@ -2,6 +2,7 @@
 [HvReceipt] ENTRY SAFE prev=0
 [HvReceipt] MBOX pa=1073741824
 [HvReceipt] BOOT PATH file
+[HvReceipt] CORE ZAP RELOC
 [HvReceipt] BOOT START
 [HvReceipt] CORE stage=14
 [HvReceipt] CORE detail=0

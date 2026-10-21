@@ -89,6 +89,7 @@
 #include <Protocol/DevicePath.h>
 #include <Guid/FileInfo.h>
 #include <Guid/GlobalVariable.h>
+#include <IndustryStandard/PeImage.h>
 // The boot-mode contract: mailbox layout, the mode file, and HvBootDecide() -
 // the one implementation of the mode/rescue decision. Also pulls in
 // hv_efi_receipt.h (tokens + the rescue rule) so this module and the driver
@@ -114,6 +115,40 @@
 // the module walks and copies raw nodes only).
 #define HV_DP_TYPE_MEDIA    0x04
 #define HV_DP_SUBTYPE_FILE  0x04
+
+// ── PE Relocation Zapping ───────────────────────────────────────────────────
+// Nullifies the base relocation table directory of a loaded runtime image in RAM.
+// Required for hypervisors running under physical identity-mapped HOST_CR3:
+// prevents UEFI SetVirtualAddressMap() from applying OS virtual address fixups
+// to the hypervisor's code and data sections when Windows winload.efi transitions
+// to virtual memory mode.
+STATIC VOID
+HvZapImageRelocations (
+  IN VOID *ImageBase
+  )
+{
+  EFI_IMAGE_DOS_HEADER    *DosHdr;
+  EFI_IMAGE_NT_HEADERS64  *NtHdr;
+
+  if (ImageBase == NULL) {
+    return;
+  }
+
+  DosHdr = (EFI_IMAGE_DOS_HEADER *)ImageBase;
+  if (DosHdr->e_magic != EFI_IMAGE_DOS_SIGNATURE) {
+    return;
+  }
+
+  NtHdr = (EFI_IMAGE_NT_HEADERS64 *)((UINT8 *)ImageBase + DosHdr->e_lfanew);
+  if (NtHdr->Signature != EFI_IMAGE_NT_SIGNATURE) {
+    return;
+  }
+
+  if (NtHdr->OptionalHeader.NumberOfRvaAndSizes > EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC) {
+    NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = 0;
+    NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = 0;
+  }
+}
 
 // ── Receipt append (correct: position at EOF) ───────────────────────────────
 
@@ -273,6 +308,7 @@ HvBootStartWindows (
   IN EFI_HANDLE  WinImage
   )
 {
+  gBS->Stall (100000);
   return gBS->StartImage (WinImage, NULL, NULL);
 }
 
@@ -1610,6 +1646,17 @@ HvBootMain (
       HvBootReceiptStatus (vol, "BOOT FAIL LoadImage", st);
       vol->Close (vol);
       return st;
+    }
+  }
+
+  // Zap relocations in coreImage immediately after loading.
+  // This zeroes DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC] so UEFI
+  // SetVirtualAddressMap() will not relocate hypervisor physical pointers.
+  {
+    EFI_LOADED_IMAGE_PROTOCOL *coreLi = NULL;
+    if (!EFI_ERROR (gBS->HandleProtocol (coreImage, &lipGuid, (VOID **)&coreLi)) && coreLi != NULL) {
+      HvZapImageRelocations (coreLi->ImageBase);
+      HvBootReceiptLine (vol, "CORE ZAP RELOC");
     }
   }
 

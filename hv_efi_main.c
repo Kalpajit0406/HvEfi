@@ -517,6 +517,36 @@ static const char * const g_StepMarkers[] = {
     "Secrets wiped from g_Hv"
 };
 
+// ── PE Relocation Zapping ───────────────────────────────────────────────────
+// Nullifies the base relocation table directory of this loaded runtime image in RAM.
+// Required for hypervisors running under physical identity-mapped HOST_CR3:
+// prevents UEFI SetVirtualAddressMap() from applying OS virtual address fixups
+// to the hypervisor's code and data sections when Windows winload.efi transitions
+// to virtual memory mode.
+VOID HvZapImageRelocations(IN VOID *ImageBase) {
+    EFI_IMAGE_DOS_HEADER    *DosHdr;
+    EFI_IMAGE_NT_HEADERS64  *NtHdr;
+
+    if (ImageBase == NULL) {
+        return;
+    }
+
+    DosHdr = (EFI_IMAGE_DOS_HEADER *)ImageBase;
+    if (DosHdr->e_magic != EFI_IMAGE_DOS_SIGNATURE) {
+        return;
+    }
+
+    NtHdr = (EFI_IMAGE_NT_HEADERS64 *)((UINT8 *)ImageBase + DosHdr->e_lfanew);
+    if (NtHdr->Signature != EFI_IMAGE_NT_SIGNATURE) {
+        return;
+    }
+
+    if (NtHdr->OptionalHeader.NumberOfRvaAndSizes > EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC) {
+        NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = 0;
+        NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = 0;
+    }
+}
+
 static BOOLEAN g_EnteredOnce = FALSE;
 
 // The real body. HvEfiDriverEntry below wraps it for exactly one reason:
@@ -563,15 +593,17 @@ static EFI_STATUS EFIAPI HvEfiDriverEntryImpl(
         EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
         EFI_GUID lipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
         if (!EFI_ERROR(gEfiBS->HandleProtocol(imageHandle, &lipGuid,
-                                              (VOID **)&li)) && li != NULL &&
-            li->LoadOptions != NULL && li->LoadOptionsSize >= sizeof(UINT64)) {
-            UINT64 pa = 0;
-            CopyMem(&pa, li->LoadOptions, sizeof(pa));
-            if (pa != 0 && (pa & 0xFFF) == 0) {
-                volatile HV_MAILBOX *mb = (volatile HV_MAILBOX *)(UINTN)pa;
-                if (HvMailboxValid(mb)) {
-                    g_Mailbox = mb;
-                    HvMailboxReport(mb, 0, 0);   // stage 0 = entry hit
+                                              (VOID **)&li)) && li != NULL) {
+            HvZapImageRelocations(li->ImageBase);
+            if (li->LoadOptions != NULL && li->LoadOptionsSize >= sizeof(UINT64)) {
+                UINT64 pa = 0;
+                CopyMem(&pa, li->LoadOptions, sizeof(pa));
+                if (pa != 0 && (pa & 0xFFF) == 0) {
+                    volatile HV_MAILBOX *mb = (volatile HV_MAILBOX *)(UINTN)pa;
+                    if (HvMailboxValid(mb)) {
+                        g_Mailbox = mb;
+                        HvMailboxReport(mb, 0, 0);   // stage 0 = entry hit
+                    }
                 }
             }
         }

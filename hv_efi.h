@@ -15,6 +15,7 @@
 #include <Protocol/MpService.h>
 #include <Protocol/LoadedImage.h>
 #include <Guid/GlobalVariable.h>
+#include <IndustryStandard/PeImage.h>
 
 #include "hvdefs.h"
 #include "hv_efi_stage.h"
@@ -31,6 +32,7 @@ void __outbyte(unsigned short Port, unsigned char Data);
 // two channels the BSP does, or "CPU 3 never launched" is indistinguishable
 // from a clean stand-down.
 void HvReportStage(UINT32 stage, UINT32 detail);
+VOID HvZapImageRelocations(IN VOID *ImageBase);
 
 // ── EFI globals (set during entry, used by init code) ──────────────────────
 
