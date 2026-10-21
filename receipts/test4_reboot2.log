@@ -1,0 +1,380 @@
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
+[HvEfi] EFI DXE VMX Hypervisor â starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[+] Step 5: Ticket read from the mailbox
+[+] Step 6: Session keys derived
+[+] Step 7: Decoy pages allocated
+[VMX] EPT: 5 RAM ranges (shared with host map)
+[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD52E01E, 3 splits
+[+] Step 8: VMX initialized (16 CPUs, EPT ready)
+[+]   EFI image: 66 pages at 0xD51A000 (executable hide)
+[+] Step 9: 1209 pages to hide
+[+] Step 10: EPT hiding complete
+[+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
+[VMEXIT] cpu=1 reason=31 rip=0x00[0V000ME0X0[0IVFMTE]B4[XDI 4VBcTMCp][ VEu
+X=M2EIcX [ITpT]ur[=eV V3]M cMa[pEsuErXXo =eVcIM[4IpaE nTuVTsXM]=rEo ]I=eTn[ ]X3V5a cM1cI[=pE s3cpXV puo1[uMTrur=i]=nEIep7V== =8X M36I[E TXr]0ac1ixp T I sVcro ]urpM0epnrraT[u E0e=iX]seVpcaoIa==n91T M===]3p00s[ 30ocurx 1E1Vp0en c00s ux M[a0prroX+ir00s==0=0Ee3101Ii]1pT00ou] n002=0=0naS X01=t030  10F0ec01p3pIpsB 0rxu =4=rr iT=0eD00x1 rpr]00a40e013o0=0s  eio0cp0a4n0ns21r xaB0=r0s=oF=ei0:on3000a3=0BC0p0px sn10013u1o=0040 F=n0A0 0F
+BDxlrr00 i=i0=410r4p0B50B =D3p0lir3 F0Ce4001aDp=0x410=B1000
+B0C  xs0r040x046000r00oD 00000
+B0n0iC00=F0FC030
+0B4FBB14PB0i0400Cp40D0pUD04000D=0
+s0=40BF004 C00B BFBvxC
+4xi00C0DBF0
+B4r4r04t0
+0iDBDp0Cu40a4=lB0
+0iCx0zB00C
+00e00d0000
+
+F0F[B04+B0D044]0B D0SC04tBe
+FpB C41D43:B C
+S
+ecrets wiped from g_Hv
+
+[HvEfi] VMX hypervisor active. OS will boot under virtualization.
+
+[HvReceipt] CORE stage=13
+[HvReceipt] CORE detail=0
+[HvReceipt] EPT units=1
+[HvReceipt] EPT ranges=5
+[HvReceipt] EPT maxphys_lo=1073741824
+[HvReceipt] EPT maxphys_hi=2
+[HvReceipt] EPT splits=3
+[HvReceipt] EPT gb=512
+[HvReceipt] VMCS pin=22
+[HvReceipt] VMCS proc=2483052922
+[HvReceipt] VMCS exit=4157435
+[HvReceipt] VMCS proc2=1052842
+[HvReceipt] EXITS total=49
+[HvReceipt] FULL DONE
+[HvReceipt] BOOT DONE
+
+[HvBoot] Probing hypervisor via authenticated VMCALL...
+[HvBoot] Calculated BootMagic: 0xF869878B883CC167
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x2C0B884873F37BF2
+[HvReceipt] VMCALL DETECT SUCCESS
+[+] [HvBoot] Session Derived! SessionMagic = 0x72D58B0B6A071619
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] Hypervisor Status: 0x0000000000010010 (vCPUs: 16, Running: 1)
+[HvReceipt] VMCALL STATUS vcpus=16
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
+
+[HvReceipt] VMCALL SELFTEST PASS
+[HvReceipt] NOP VMCALL
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[HvReceipt] NOP st hi=738953288
+[HvReceipt] HYPERVISOR RESIDENT
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WIN slot start
+[HvBoot] Found Windows Boot Manager! Starting winImage...
+[VMEXIT] cpu=0 reason=55 rip=0x000000001028720D
+[VMEXIT] cpu=0 reason=55 rip=0x0000000010287255
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000B79715
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000B7975D
+[VMEXIT] cpu=0 reason=55 rip=0x000000001028720D
+[VMEXIT] cpu=0 reason=55 rip=0x0000000010287255
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000FE0715
+[VMEXIT] cpu=0 reason=31 rip=0x0000000000FCCF0A
+[[[[V[[[[[VVM[VVV[[VVVMMVEM[M[VMXMEMEEVMVEMIXEXXXMMIVETI[EEMEMVITE]EXXITEI MEXXXXTIXIX]]]EITTITXITcXT I ]p] I]T]c]uIT  pI cc ]=]TT Tccc] pccu5]upp  p]T u cuc=p=cpr4c1=u=ppp]u0uu =1up ue =8=c 6=c=r 1u1rp11 a3rp e1 2pseareuu4s=aeraur=   aosros=eo2r7er=1 o=nne 35=rar a9nea3 n eseraa==rss3assse reoaoeor=oos3nai3nsnoe n=na=p o=3=on3ars n3= o=33 0 i nrxrr ps=0=rr=nirsop3=iri 0i=3i3iip=prp0pn0op3=i n00 == =ppx0=0x==rxr00=i003ixpp3x 0r= 0=00000x0r0r00x0xix00=00000000000pii0000x=00p00000000000=00p00000000=000x00x000F00x00000000F0000FBB00040400B0D00000DxF00004F00000B400040040B7000DF4070D00010D0140400FB4070B
+071000F40470DB1F0
+040BDF000170
+44
+FBFF74B0114BDD
+B0044D04D
+704
+41D47F74410B
+D107470
+417
+F1D4B1
+
+47D
+4171
+
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000FE075D
+[VMEXIT] cpu=0 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=1 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=1 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=2 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=2 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=3 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=3 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=4 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=4 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=5 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=5 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=6 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=6 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=7 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=7 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=8 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=8 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=9 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=9 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=10 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=10 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=11 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=11 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=12 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=12 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=13 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=13 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=14 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=14 reason=55 rip=0xFFFFF8007155906D
+[VMEXIT] cpu=15 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=15 reason=55 rip=0xFFFFF8007155906D
+[HvReceipt] BOOT HIT
+[HvReceipt] ENTRY FULL
+[HvReceipt] FULL START
+[HvReceipt] MBOX pa=1073741824
+[HvReceipt] LAST HCALL count=4
+[HvReceipt] LAST HCALL last_id=0
+[HvReceipt] LAST HCALL status=1945336818
+[HvReceipt] LAST HCALL magic_lo=2285683047
+[HvReceipt] LAST HCALL magic_hi=4167665547
+[HvReceipt] LAST EXITS total=91990
+[HvReceipt] LAST EXIT reason=10
+[HvReceipt] LAST EXIT cpu=0
+[HvReceipt] LAST EXIT rip_lo=1895054245
+[HvReceipt] LAST EXIT rip_hi=4294965248
+[HvReceipt] LAST RING slot=6
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=3
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=7
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=1
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=8
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=7
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=9
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=2
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=10
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=8
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=11
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=11
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=12
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=15
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=13
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=13
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=14
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=10
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=15
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=9
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=0
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=12
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=1
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=5
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=2
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=6
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=3
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=4
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=4
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=14
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST RING slot=5
+[HvReceipt] LAST RING reason=10
+[HvReceipt] LAST RING cpu=0
+[HvReceipt] LAST RING rip_lo=1895054245
+[HvReceipt] LAST RING rip_hi=4294965248
+[HvReceipt] LAST RING leaf=1
+[HvReceipt] LAST VMCS pin=22
+[HvReceipt] LAST VMCS exit=4157435
+[HvReceipt] CORE LAST stage=13
+[HvReceipt] CORE LAST EBS
+[HvReceipt] BOOT PATH file
+[HvReceipt] BOOT START
+
+[HvEfi] EFI DXE VMX Hypervisor â starting (full mode)
+[+] Step 1: VMX supported
+[+] Step 2: MP Services located
+[VMX] Host page tables built at PA=0xFBD8000 (512 GB / 1 unit(s))
+[+] Step 3: Host page tables built
+[+] Step 4: Nonce generated
+[+] Step 5: Ticket read from the mailbox
+[+] Step 6: Session keys derived
+[+] Step 7: Decoy pages allocated
+[VMX] EPT: 5 RAM ranges (shared with host map)
+[VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD52E01E, 3 splits
+[+] Step 8: VMX initialized (16 CPUs, EPT ready)
+[+]   EFI image: 66 pages at 0xD51A000 (executable hide)
+[+] Step 9: 1209 pages to hide
+[+] Step 10: EPT hiding complete
+[+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
+[VMEXIT] cpu=1 reason=31 rip=0x000000[0V0M0EFXBI4TD]4 BcCp[uV=M2[
+V EMXrE[IeTa[XIV]VsMT [[MEo]V[VcV pM[EXncMMIuEE=[XEpTX[3I]V1XVIuXT=[ MV=TE]MIX]MV IE 3EITcMTc]XE] rppT XXc4Iuc iIp T] cIu pp]T=]T cuu=rr5c ] p= pecra9p=[pce6Vu=[= pauM 1s1rrVse=ueuoe20au7EnMax=Xa0=1so 3 E rs3rsoro=[ =e0nXn+I1o]=aeneI 3=n1sr8a10TTs=]a  e31So0ot31sr] r n=nc0ee a1ap3ors0 r=oni =usreo 0331=i0=can rn3pp1i1i10 p=r 0 =pp11ri3s=pu1=o= 2r0 in=3p0Fir=04pr1xBi501x 0===p0xp00= =0i:3001000rrx0x0 p00i000400=0xp0 000r000Dxr000ie000e04 ax0FBp000x0s=0B00=0aA0C000l00o00F00s000B400xl
+x0n004o000000 nD0F00000=010F0340B000010BD0=00BF040 6404B300 D01BD0rCF00i40C 0CB04pB00Br0
+0CFFP00=B
+
+4D00i4CB4UF44Fx0BDBs4p4
+0 0D=DB44FvBBiB00rDCDx44C40B4BtC0CCD0B4
+00Bu
+
+C
+aC0
+0
+0
+l000i0000F0BFz4BD44D4BBCCe
+
+d
+[+] Step 13: Secrets wiped from g_Hv
+
+[HvEfi] VMX hypervisor active. OS will boot under virtualization.
+
+[HvReceipt] CORE stage=13
+[HvReceipt] CORE detail=0
+[HvReceipt] EPT units=1
+[HvReceipt] EPT ranges=5
+[HvReceipt] EPT maxphys_lo=1073741824
+[HvReceipt] EPT maxphys_hi=2
+[HvReceipt] EPT splits=3
+[HvReceipt] EPT gb=512
+[HvReceipt] VMCS pin=22
+[HvReceipt] VMCS proc=2483052922
+[HvReceipt] VMCS exit=4157435
+[HvReceipt] VMCS proc2=1052842
+[HvReceipt] EXITS total=49
+[HvReceipt] FULL DONE
+[HvReceipt] BOOT DONE
+
+[HvBoot] Probing hypervisor via authenticated VMCALL...
+[HvBoot] Calculated BootMagic: 0xF869878B883CC167
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x8F21FF676FD057BA
+[HvReceipt] VMCALL DETECT SUCCESS
+[+] [HvBoot] Session Derived! SessionMagic = 0xDFF3AE94695B7459
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] Hypervisor Status: 0x0000000000010010 (vCPUs: 16, Running: 1)
+[HvReceipt] VMCALL STATUS vcpus=16
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
+
+[HvReceipt] VMCALL SELFTEST PASS
+[HvReceipt] NOP VMCALL
+[VMEXIT] cpu=0 reason=18 rip=0x000000000D6D61CA
+[HvReceipt] NOP st hi=2401369959
+[HvReceipt] HYPERVISOR RESIDENT
+[HvBoot] Connecting all UEFI device drivers...
+[HvBoot] ChainloadWindows: reading BootOrder...
+[HvReceipt] CHAIN WIN slot load
+[HvReceipt] CHAIN WIN esp retry
+[HvReceipt] CHAIN WIN slot start
+[HvBoot] Found Windows Boot Manager! Starting winImage...
+[VMEXIT] cpu=0 reason=55 rip=0x000000001028720D
+[VMEXIT] cpu=0 reason=55 rip=0x0000000010287255
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000B79715
+[VMEXIT] cpu=0 reason=31 rip=0x0000000000B65F0A
+[[V[[[[[[[V[V[VVVVV[VVMMM[MMMEMVMMMVEEE[E[EEEXXXEXXEXMIIVMXVIMEXTXTIEX]IVITIXIEITTXITIMT]MT]] ]E  I X] XIcccTTcE]]TT pp I]Tp]cuucpcup]p= u==XT91  ]1pcc=1] ] uI2uu  cp c= cp== r1pupT6ce=]73u aup s r1r1rc eure=c=pruoea551eu0ap=easp 4 8nsoa nu=arus =r sr=3reo32eon =ae=r=on=3aens s=a  aoes=3o1ss3ar4r nosri  i=p rrorrinoo=n3in=p=e3enp03 pi ar=r= =asxn3pse 0=or3=rio=3e=0a0 r 00iraxp0sior3sxxni0x=pp n0000000n00==xpo0=i3r00000==0=00pn0x00003i=000p0=030 0000=30x00 0r0x0000 0x 0i00x000r0Fr00000i00000r0F0iip0F000pp=0000B00BF00400=000FF=B00pB0BB0D0044000040x44000DDFD00B=D40044x0407070D4F1704701010BD00F
+7444B00F17D7
+
+1011400FB4B
+
+xx074
+1D040040
+
+0070DD0404701000
+701001000F
+00000
+0B004FD040B741DFFBB44D744D
+741171
+
+
+[VMEXIT] cpu=0 reason=55 rip=0x0000000000B7975D
+[VMEXIT] cpu=0 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=1 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=1 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=2 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=2 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=3 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=3 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=4 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=4 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=5 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=5 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=6 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=6 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=7 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=7 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=8 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=8 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=9 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=9 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=10 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=10 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=11 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=11 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=12 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=12 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=13 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=13 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=14 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=14 reason=55 rip=0xFFFFF801D4D5906D
+[VMEXIT] cpu=15 reason=4 rip=0x000000000FB4D471
+[VMEXIT] cpu=15 reason=55 rip=0xFFFFF801D4D5906D

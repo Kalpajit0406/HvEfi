@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import make_fat16
 
@@ -39,7 +40,9 @@ startup_text = (
 )
 startup_data = startup_text.encode('ascii')
 
-cfg_data = b'F'
+mode_char = sys.argv[1].upper() if len(sys.argv) > 1 else 'F'
+cfg_data = mode_char.encode('ascii')
+print(f"[*] Building ISO with mode: {mode_char}")
 
 fat_files = {
     'EFI/BOOT/BOOTX64.EFI': shell_data,
