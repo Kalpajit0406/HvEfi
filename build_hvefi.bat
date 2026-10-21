@@ -185,6 +185,10 @@ rem the stale one.
 if "%MISSING%"=="0" (
     copy /y "%OUT%" "%SRC%HvEfi.efi" >nul
     copy /y "%BOOTOUT%" "%SRC%HvBoot.efi" >nul
+    echo [*] Provisioning dual sentinels for direct lab and USB deployment ...
+    python "%SRC%patch_sentinels.py" "%SRC%HvEfi.efi" "%SRC%hvcore_patched.efi"
+    copy /y "%SRC%hvcore_patched.efi" "%SRC%hvcore.efi" >nul
+    python "%SRC%patch_sentinels.py" "%SRC%HvBoot.efi" "%SRC%HvBoot_patched.efi"
 )
 
 rem ── Post-build contract checks ────────────────────────────────────────────

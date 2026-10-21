@@ -524,8 +524,12 @@ static const char * const g_StepMarkers[] = {
 // to the hypervisor's code and data sections when Windows winload.efi transitions
 // to virtual memory mode.
 VOID HvZapImageRelocations(IN VOID *ImageBase) {
-    EFI_IMAGE_DOS_HEADER    *DosHdr;
-    EFI_IMAGE_NT_HEADERS64  *NtHdr;
+    EFI_IMAGE_DOS_HEADER      *DosHdr;
+    EFI_IMAGE_NT_HEADERS64    *NtHdr;
+    EFI_IMAGE_SECTION_HEADER  *SecHdr;
+    UINT16                    i;
+    UINT64                    cr0;
+    BOOLEAN                   wpActive;
 
     if (ImageBase == NULL) {
         return;
@@ -541,9 +545,38 @@ VOID HvZapImageRelocations(IN VOID *ImageBase) {
         return;
     }
 
+    // Temporarily disable CR0.WP in case firmware has memory protection active
+    cr0 = __readcr0();
+    wpActive = (cr0 & (1ULL << 16)) != 0;
+    if (wpActive) {
+        __writecr0(cr0 & ~(1ULL << 16));
+    }
+
+    // 1. Zap DataDirectory[BASERELOC]
     if (NtHdr->OptionalHeader.NumberOfRvaAndSizes > EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC) {
         NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = 0;
         NtHdr->OptionalHeader.DataDirectory[EFI_IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = 0;
+    }
+
+    // 2. Zap the .reloc section header itself
+    SecHdr = (EFI_IMAGE_SECTION_HEADER *)((UINT8 *)&NtHdr->OptionalHeader + NtHdr->FileHeader.SizeOfOptionalHeader);
+    for (i = 0; i < NtHdr->FileHeader.NumberOfSections; i++) {
+        if (SecHdr[i].Name[0] == '.' &&
+            SecHdr[i].Name[1] == 'r' &&
+            SecHdr[i].Name[2] == 'e' &&
+            SecHdr[i].Name[3] == 'l' &&
+            SecHdr[i].Name[4] == 'o' &&
+            SecHdr[i].Name[5] == 'c') {
+            SecHdr[i].VirtualAddress = 0;
+            SecHdr[i].Misc.VirtualSize = 0;
+            SecHdr[i].SizeOfRawData = 0;
+            SecHdr[i].Characteristics = 0;
+            break;
+        }
+    }
+
+    if (wpActive) {
+        __writecr0(cr0);
     }
 }
 

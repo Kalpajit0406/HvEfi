@@ -59,6 +59,7 @@
   UefiApplicationEntryPoint
   UefiBootServicesTableLib
   UefiRuntimeServicesTableLib
+  BaseLib
   BaseMemoryLib
   DebugLib
 

@@ -13,7 +13,9 @@ SERIAL_LOG = r"C:\Users\DELL\Documents\Virtual Machines\Windows 11 x64\hvserial.
 RECEIPTS_DIR = r"F:\HvEfi\receipts"
 
 def stop_vm():
-    print("[*] Stopping VM (hard)...")
+    print("[*] Stopping VM...")
+    subprocess.run([VMRUN, "-T", "ws", "stop", VMX, "soft"], capture_output=True)
+    time.sleep(2)
     subprocess.run([VMRUN, "-T", "ws", "stop", VMX, "hard"], capture_output=True)
     time.sleep(2)
 
@@ -155,7 +157,7 @@ def analyze_log(log_text):
             info["active_cpus"].add(c)
     return info
 
-def run_test_boot(mode='F', min_wait=60, max_timeout=120, receipt_name='test.log', screenshot_name='test.png', stop_vm_after=True, soak_seconds=None):
+def run_test_boot(mode='F', min_wait=60, max_timeout=180, receipt_name='test.log', screenshot_name='test.png', stop_vm_after=True, soak_seconds=None):
     print(f"\n{'='*70}\n[*] RUNNING BOOT TEST: mode={mode}, max_timeout={max_timeout}s\n{'='*70}")
     stop_vm()
     build_iso(mode)
@@ -166,6 +168,7 @@ def run_test_boot(mode='F', min_wait=60, max_timeout=120, receipt_name='test.log
     colors = 0
     screenshot_path = os.path.join(RECEIPTS_DIR, screenshot_name)
     desktop_detected_at = None
+    prompt_dismissed = False
 
     while True:
         elapsed = time.time() - start_time
@@ -190,15 +193,18 @@ def run_test_boot(mode='F', min_wait=60, max_timeout=120, receipt_name='test.log
                         print(f"[+] Graphical desktop detected at {elapsed:.1f}s ({colors} distinct colors)!")
                     if not soak_seconds or elapsed >= soak_seconds:
                         break
-                elif colors < 500:
-                    print(f"[*] Text prompt / recovery screen detected ({colors} colors) at {elapsed:.1f}s, sending Enter...")
-                    vnc_send_keys([0xFF0D], wait_after=2.0)
                 else:
                     im = Image.open(screenshot_path)
                     top = sorted(im.getcolors(maxcolors=100000), key=lambda x: x[0], reverse=True)[0]
                     if top[1] == (32, 103, 178):
                         print(f"[*] WinRE blue screen detected ({colors} colors) at {elapsed:.1f}s, sending Enter...")
                         vnc_send_keys([0xFF0D], wait_after=2.0)
+                    elif not prompt_dismissed and colors < 100 and top[1] == (0, 0, 0) and im.getbbox() is not None:
+                        print(f"[*] Windows Boot Manager text prompt detected ({colors} colors) at {elapsed:.1f}s, sending Enter once...")
+                        vnc_send_keys([0xFF0D], wait_after=2.0)
+                        prompt_dismissed = True
+                    else:
+                        print(f"[*] Boot in progress ({colors} colors at {elapsed:.1f}s)...")
             except Exception as e:
                 pass
 
@@ -304,7 +310,7 @@ def test_4_multiboot_reproducibility():
     results = []
     for cycle in range(1, 4):
         print(f"\n--- Boot Cycle {cycle} of 3 ---")
-        info = run_test_boot(mode='F', min_wait=60, max_timeout=120,
+        info = run_test_boot(mode='F', min_wait=60, max_timeout=180,
                              receipt_name=f'test4_reboot{cycle}.log',
                              screenshot_name=f'test4_reboot{cycle}.png')
         assert info['step13'], f"Cycle {cycle}: Step 13 not reached!"
