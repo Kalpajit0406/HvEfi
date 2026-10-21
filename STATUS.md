@@ -31,7 +31,7 @@
 | **VMX features** | EPT, unrestricted guest, VPID, true MSR controls |
 | **Firmware** | Dell/InsydeH2O UEFI, DXE phase driver loading, Secure Boot available |
 | **OS** | Windows 11 Pro (64-bit) |
-| **RAM** | 16 GB DDR5 |
+| **RAM** | 24 GB DDR5 (8 GB + 16 GB DDR5 4800, asymmetric flex mode) |
 | **Storage** | NVMe SSD (ESP on same drive, FAT32, mounted via `mountvol W: /S`) |
 
 **Why this hardware matters**: The Dell G15's InsydeH2O firmware has specific
