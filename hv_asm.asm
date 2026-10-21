@@ -147,10 +147,12 @@ HvAsmVmxEntry PROC FRAME
     mov     eax, dword ptr [g_HvStateSaveMask]
     xor     edx, edx
     db      0Fh, 0AEh, 24h, 24h       ; xsave [rsp], mask in EDX:EAX
+    mov     dword ptr [rsp + HV_XSAVE_AREA + 20h], 1 ; SaveMode = XSAVE (1)
     jmp     _save_done
 
 _save_fxsave:
     db      0Fh, 0AEh, 04h, 24h       ; fxsave [rsp]
+    mov     dword ptr [rsp + HV_XSAVE_AREA + 20h], 0 ; SaveMode = FXSAVE (0)
 
 _save_done:
     ; RCX = pointer to GUEST_REGS (above the extended-state area)
@@ -169,7 +171,7 @@ _save_done:
     ; -- Resume the guest --------------------------------------------------
     ; Restore extended state from [rsp]. Inlined (not a call) because the
     ; helper would push a return address and move [rsp] off the save area.
-    cmp     dword ptr [g_HvStateSaveMode], 0
+    cmp     dword ptr [rsp + HV_XSAVE_AREA + 20h], 0
     jz      _resume_fxsave
     mov     eax, dword ptr [g_HvStateSaveMask]
     xor     edx, edx
@@ -207,7 +209,7 @@ _resume_xrestored:
 
 _vmexit_shutdown:
     ; -- Devirtualize this CPU (HvExitHandler returned FALSE) ---------------
-    cmp     dword ptr [g_HvStateSaveMode], 0
+    cmp     dword ptr [rsp + HV_XSAVE_AREA + 20h], 0
     jz      _shutdown_fxsave
     mov     eax, dword ptr [g_HvStateSaveMask]
     xor     edx, edx

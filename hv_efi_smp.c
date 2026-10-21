@@ -209,6 +209,11 @@ static void VirtualizeCpuBody(PVOID context) {
     cr4 = __readcr4();
     cr4 |= __readmsr(MSR_IA32_VMX_CR4_FIXED0);
     cr4 &= __readmsr(MSR_IA32_VMX_CR4_FIXED1);
+    int cpuid1[4] = {0};
+    __cpuid(cpuid1, 1);
+    if (cpuid1[2] & (1 << 26)) {
+        cr4 |= CR4_OSXSAVE;
+    }
     __writecr4(cr4);
 
     // Enable VMXON outside SMX if not already locked.

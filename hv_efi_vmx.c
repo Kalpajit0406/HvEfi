@@ -188,6 +188,12 @@ NTSTATUS HvVmxInitialize(void) {
     // the samples must be taken while this CPU is still unrestricted.
     HvCalibrateCpuidLatency();
 
+    int cpuid1[4] = {0};
+    __cpuid(cpuid1, 1);
+    if (cpuid1[2] & (1 << 26)) {
+        __writecr4(__readcr4() | CR4_OSXSAVE);
+    }
+
     // Must happen before any VM entry: hv_asm.asm reads both symbols on every
     // exit and resume, and a zero mask would XSAVE nothing meaningful. A FALSE
     // return means an XCR0-enabled component does not fit the reserved save
