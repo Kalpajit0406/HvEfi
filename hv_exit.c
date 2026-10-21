@@ -12,44 +12,6 @@
 #include "../hv_ept_gen.h"    // HvEptGenerationSync / HvEptPublishMutation
 #include "../hv_hookpool.h"   // HvHookTagMake / HvHookTagSlot / HvHookTagMatches
 
-unsigned char __inbyte(unsigned short Port);
-void __outbyte(unsigned short Port, unsigned char Data);
-
-static void RawUartWrite(char c) {
-  UINT32 timeout = 10000;
-  while ((__inbyte(0x3FD) & 0x20) == 0 && --timeout);
-  __outbyte(0x3F8, (unsigned char)c);
-}
-
-static void RawUartPrint(const char *str) {
-  while (*str) {
-    if (*str == '\n') RawUartWrite('\r');
-    RawUartWrite(*str++);
-  }
-}
-
-static void RawUartPrintHex64(UINT64 val) {
-  static const char hex[] = "0123456789ABCDEF";
-  for (int i = 60; i >= 0; i -= 4) {
-    RawUartWrite(hex[(val >> i) & 0xF]);
-  }
-}
-
-static void RawUartPrintNum(UINT32 val) {
-  char buf[12];
-  int i = 0;
-  if (val == 0) {
-    RawUartWrite('0');
-    return;
-  }
-  while (val > 0) {
-    buf[i++] = (char)('0' + (val % 10));
-    val /= 10;
-  }
-  while (--i >= 0) {
-    RawUartWrite(buf[i]);
-  }
-}
 
 // ── Advance guest RIP past the faulting instruction ─────────────────────────
 
@@ -646,7 +608,6 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
   // (see the read side above).
   default:
     if (!HvAsmWriteMsrSafe(msr, val)) {
-      RawUartPrint(" [WRMSR SAFE WRITE FAILED -> INJECTING GP]\n");
       HvInjectGp();
       return;
     }
@@ -835,15 +796,6 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   __vmx_vmread(VMCS_GUEST_RIP, &rip);
   __vmx_vmread(VMCS_GUEST_RSP, &rsp);
 
-  if (reason != EXIT_REASON_CPUID && reason != EXIT_REASON_WRMSR) {
-    RawUartPrint("[VMEXIT] cpu=");
-    RawUartPrintNum(vcpu ? vcpu->ProcessorIndex : 0);
-    RawUartPrint(" reason=");
-    RawUartPrintNum(reason);
-    RawUartPrint(" rip=0x");
-    RawUartPrintHex64(rip);
-    RawUartPrint("\n");
-  }
 
   if (reason < 64) InterlockedIncrement64(&g_Hv.ExitCounts[reason]);
 

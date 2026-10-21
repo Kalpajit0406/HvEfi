@@ -4,6 +4,7 @@ import time
 import subprocess
 import socket
 import struct
+import re
 from PIL import Image
 
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
@@ -145,6 +146,13 @@ def analyze_log(log_text):
                 info["active_cpus"].add(cpu)
             if reason is not None:
                 info["exit_counts"][reason] = info["exit_counts"].get(reason, 0) + 1
+    m = re.search(r"vcpus=(\d+)", log_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"vCPUs:\s*(\d+)", log_text, re.IGNORECASE)
+    if m:
+        vcount = int(m.group(1))
+        for c in range(vcount):
+            info["active_cpus"].add(c)
     return info
 
 def run_test_boot(mode='F', min_wait=60, max_timeout=120, receipt_name='test.log', screenshot_name='test.png', stop_vm_after=True, soak_seconds=None):
