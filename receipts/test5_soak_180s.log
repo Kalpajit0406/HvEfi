@@ -19,7 +19,7 @@
 [VMX] EPT: identity mapped 512 GB / 1 unit(s), EPTP=0xD52E01E, 3 splits
 [+] Step 8: VMX initialized (16 CPUs, EPT ready)
 [+]   EFI image: 66 pages at 0xD51A000 (executable hide)
-[+] Step 9: 1208 pages to hide
+[+] Step 9: 1207 pages to hide
 [+] Step 10: EPT hiding complete
 [+] Step 11: CR3 offset = 0x28 (default; configurable via hypercall)
 [+] Step 12: All 16 CPUs virtualized
@@ -45,16 +45,16 @@
 
 [HvBoot] Probing hypervisor via authenticated VMCALL...
 [HvBoot] Calculated BootMagic: 0xF869878B883CC167
-[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x4FA7E6BF3A35799C
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x816F49B2E5DD77AD
 [HvReceipt] VMCALL DETECT SUCCESS
-[+] [HvBoot] Session Derived! SessionMagic = 0x4E2FFA29CEDBCD10
+[+] [HvBoot] Session Derived! SessionMagic = 0x7CF9C3C12C45CDAD
 [+] [HvBoot] Hypervisor Status: 0x0000000000010010 (vCPUs: 16, Running: 1)
 [HvReceipt] VMCALL STATUS vcpus=16
 [+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
 
 [HvReceipt] VMCALL SELFTEST PASS
 [HvReceipt] NOP VMCALL
-[HvReceipt] NOP st hi=1336403647
+[HvReceipt] NOP st hi=2171554226
 [HvReceipt] HYPERVISOR RESIDENT
 [HvBoot] Connecting all UEFI device drivers...
 [HvBoot] ChainloadWindows: reading BootOrder...

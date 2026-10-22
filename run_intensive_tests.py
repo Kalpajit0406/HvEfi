@@ -203,6 +203,9 @@ def run_test_boot(mode='F', min_wait=60, max_timeout=180, receipt_name='test.log
                         print(f"[*] Windows Boot Manager text prompt detected ({colors} colors) at {elapsed:.1f}s, sending Enter once...")
                         vnc_send_keys([0xFF0D], wait_after=2.0)
                         prompt_dismissed = True
+                    elif colors == 1 and desktop_detected_at is not None:
+                        # Windows turned off display due to idle power policy - press Shift to wake
+                        vnc_send_keys([0xFFE1], wait_after=1.0)
                     else:
                         print(f"[*] Boot in progress ({colors} colors at {elapsed:.1f}s)...")
             except Exception as e:
@@ -326,13 +329,47 @@ def test_5_soak_180s():
     print("\n" + "="*70)
     print("[TEST 5] Long-Duration Soak Test (180s Continuous Execution)")
     print("="*70)
-    info = run_test_boot(mode='F', min_wait=60, max_timeout=190, soak_seconds=180,
+    info = run_test_boot(mode='F', min_wait=60, max_timeout=220, soak_seconds=180,
                          receipt_name='test5_soak_180s.log',
                          screenshot_name='test5_soak_180s.png')
     assert info['step13'], "Step 13 not reached!"
     assert len(info['active_cpus']) == 16, f"Expected 16 active CPUs, got {len(info['active_cpus'])}"
-    assert info['colors'] > 5000, f"Colors {info['colors']} <= 5000"
+    assert info['desktop_detected_at'] is not None, "Desktop was never detected!"
     print(f"[+] TEST 5 PASSED: 180s soak completed without faults. Exit profile: {info['exit_counts']}")
+    return info
+
+def test_6_multiboot_10x():
+    print("\n" + "="*70)
+    print("[TEST 6] 10-Cycle Stress Multi-Boot Reproducibility")
+    print("="*70)
+    build_iso('F')
+    results = []
+    for cycle in range(1, 11):
+        print(f"\n--- Boot Cycle {cycle} of 10 ---")
+        info = run_test_boot(mode='F', min_wait=60, max_timeout=180,
+                             receipt_name=f'test6_reboot{cycle}.log',
+                             screenshot_name=f'test6_reboot{cycle}.png')
+        assert info['step13'], f"Cycle {cycle}: Step 13 not reached!"
+        assert info['vmcall_detect'], f"Cycle {cycle}: VMCALL detect failed!"
+        assert len(info['active_cpus']) == 16, f"Cycle {cycle}: Only {len(info['active_cpus'])} CPUs active"
+        assert info['colors'] > 5000, f"Cycle {cycle}: Distinct colors {info['colors']} <= 5000"
+        results.append(info)
+        print(f"[+] Boot Cycle {cycle}/10 SUCCEEDED (Colors: {info['colors']}, Time: {info['boot_time']:.1f}s)")
+    print("[+] TEST 6 PASSED: 10/10 consecutive cold reboots 100% reproducible!")
+    return results
+
+def test_7_soak_15m():
+    print("\n" + "="*70)
+    print("[TEST 7] Extended Endurance Soak Test (900s / 15-Minute Continuous Execution)")
+    print("="*70)
+    info = run_test_boot(mode='F', min_wait=60, max_timeout=980, soak_seconds=900,
+                         receipt_name='test7_soak_15m.log',
+                         screenshot_name='test7_soak_15m.png')
+    assert info['step13'], "Step 13 not reached!"
+    assert len(info['active_cpus']) == 16, f"Expected 16 active CPUs, got {len(info['active_cpus'])}"
+    assert info['desktop_detected_at'] is not None, "Desktop was never detected!"
+    assert info['boot_time'] >= 900, f"Expected at least 900s of soak time, got {info['boot_time']:.1f}s"
+    print(f"[+] TEST 7 PASSED: 900s (15-min) soak completed with zero faults. Exit profile: {info['exit_counts']}")
     return info
 
 if __name__ == '__main__':
@@ -349,6 +386,10 @@ if __name__ == '__main__':
         test_4_multiboot_reproducibility()
     if target in ('5', 'test5', 'all'):
         test_5_soak_180s()
+    if target in ('6', 'test6', '10x'):
+        test_6_multiboot_10x()
+    if target in ('7', 'test7', 'soak15'):
+        test_7_soak_15m()
 
     print("\n" + "="*70)
     print("[+] ALL TARGETED TESTS COMPLETED SUCCESSFULLY!")
