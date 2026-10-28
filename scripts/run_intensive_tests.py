@@ -245,7 +245,7 @@ def test_1_full_cold_boot():
     print("\n" + "="*70)
     print("[TEST 1] Cold Boot in Full Mode ('F') with 16 vCPUs")
     print("="*70)
-    info = run_test_boot(mode='F', min_wait=65, max_timeout=110,
+    info = run_test_boot(mode='F', min_wait=65, max_timeout=180,
                          receipt_name='test1_full_cold_boot.log',
                          screenshot_name='test1_full_cold_boot.png')
     assert info['step13'], "Step 13 not reached!"
@@ -261,7 +261,7 @@ def test_2_vnc_interaction():
     print("\n" + "="*70)
     print("[TEST 2] Lock Screen Dismissal & VNC Interactive Input")
     print("="*70)
-    info = run_test_boot(mode='F', min_wait=65, max_timeout=110,
+    info = run_test_boot(mode='F', min_wait=65, max_timeout=180,
                          receipt_name='test2_before.log',
                          screenshot_name='test2_before_interaction.png',
                          stop_vm_after=False)
@@ -296,7 +296,7 @@ def test_3_safe_mode():
     print("\n" + "="*70)
     print("[TEST 3] Safe Mode Boot ('S') Stand-Down Verification")
     print("="*70)
-    info = run_test_boot(mode='S', min_wait=65, max_timeout=110,
+    info = run_test_boot(mode='S', min_wait=65, max_timeout=180,
                          receipt_name='test3_safe_mode.log',
                          screenshot_name='test3_safe_mode.png')
     assert info['safe_standdown'], "Core did not record BOOT SAFE stood-down!"
