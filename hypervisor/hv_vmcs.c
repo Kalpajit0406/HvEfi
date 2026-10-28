@@ -439,7 +439,9 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // ── Host state ──────────────────────────────────────────────────────
     // The host state defines where the CPU lands on VM-exit.
 
-    HvVmWriteChecked(VMCS_HOST_CR0, cr0);
+    // HOST_CR0 must have CR0.TS (Task Switched) cleared to ensure host FXSAVE/XRSTOR
+    // and SIMD instructions never trigger an unexpected #NM fault in root mode.
+    HvVmWriteChecked(VMCS_HOST_CR0, cr0 & ~CR0_TS);
     // HOST_CR3: EFI uses the hypervisor's own identity-mapped page tables
     // (g_Hv.HostPml4Pa) built during DXE init. The firmware's page tables (the
     // current CR3) are reclaimed after ExitBootServices, but our tables are
