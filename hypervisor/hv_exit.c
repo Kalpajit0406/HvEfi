@@ -205,7 +205,11 @@ static void CpuidTimingPad(UINT64 entryTsc) {
   UINT64 target = entryTsc + g_Hv.CpuidPadTarget;
   UINT32 jitter = g_Hv.CpuidPadJitter;
   if (jitter != 0) {
-    target += (UINT32)(HvRandomU64() % ((UINT64)jitter + 1));
+    // Fast stateless xorshift jitter from in-flight entry TSC (2 cycles, no RDRAND bus lock)
+    UINT64 r = entryTsc ^ (entryTsc >> 12);
+    r ^= r << 25;
+    r ^= r >> 27;
+    target += (UINT32)(r % ((UINT64)jitter + 1));
   }
 
   // Safety bound: prevent runaway spinning if TSC jumps or target is stale
@@ -251,6 +255,7 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
     regs->Rbx = vcpu ? (UINT64)vcpu->ProcessorIndex : 0xFFFFFFFFULL;
     regs->Rcx = (UINT64)g_Hv.ExitLogIndex;
     regs->Rdx = (UINT64)g_Hv.VcpuCount;
+    CpuidTimingPad(entryTsc);
     AdvanceGuestRip();
     return TRUE;
   }

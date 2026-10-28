@@ -25,7 +25,7 @@ const IOCTL_HV_CAPABILITIES: u32 = ctl_code(HV_DEVICE_TYPE, 0x803, METHOD_BUFFER
 const IOCTL_HV_READ_PHYS: u32 = ctl_code(HV_DEVICE_TYPE, 0x806, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS);
 const IOCTL_HV_GET_KERNEL_BASE: u32 = ctl_code(HV_DEVICE_TYPE, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
-#[repr(C, packed(8))]
+#[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct HvIoctlDetect {
     pub ticket: [u8; 32],
@@ -35,7 +35,7 @@ pub struct HvIoctlDetect {
     pub status: u64,
 }
 
-#[repr(C, packed(8))]
+#[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct HvIoctlStatus {
     pub raw_status_word: u64,
@@ -46,7 +46,7 @@ pub struct HvIoctlStatus {
     pub status: u64,
 }
 
-#[repr(C, packed(8))]
+#[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct HvIoctlCapabilities {
     pub supported_bitmask: u64,
@@ -54,18 +54,17 @@ pub struct HvIoctlCapabilities {
     pub status: u64,
 }
 
-#[repr(C, packed(8))]
+#[repr(C)]
 #[derive(Default, Clone, Copy)]
 pub struct HvIoctlKernelBase {
     pub kernel_base: u64,
     pub status: u64,
 }
 
-#[repr(C, packed(8))]
+#[repr(C)]
 pub struct HvIoctlReadPhys {
     pub physical_address: u64,
     pub size: u32,
-    pub pad: u32,
     pub buffer: [u8; 4096],
     pub status: u64,
 }
@@ -75,7 +74,6 @@ impl Default for HvIoctlReadPhys {
         Self {
             physical_address: 0,
             size: 0,
-            pad: 0,
             buffer: [0u8; 4096],
             status: 0,
         }
@@ -247,5 +245,21 @@ pub fn run_driver_tests(
 
         CloseHandle(h_dev);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ioctl_read_phys_layout() {
+        assert_eq!(std::mem::size_of::<HvIoctlReadPhys>(), 4120);
+        let s = HvIoctlReadPhys::default();
+        let base = &s as *const _ as usize;
+        let buf_addr = s.buffer.as_ptr() as usize;
+        let st_addr = &s.status as *const _ as usize;
+        assert_eq!(buf_addr - base, 12);
+        assert_eq!(st_addr - base, 4112);
     }
 }

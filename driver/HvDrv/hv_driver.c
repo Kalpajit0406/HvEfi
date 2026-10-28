@@ -527,7 +527,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     // ── Mode 2: Stealth Shared-Memory / Manual-Mapped Mode (Kratos-Compatible) ─
     // Always initialize the shared-memory comm buffer & beacon at PA 0x1000 so
     // either mapped drivers or usermode callers without device handles can communicate.
-    g_CommBuf = (HV_SHM_REQUEST *)ExAllocatePoolWithTag(NonPagedPool, HV_SHM_SIZE, 'vEdH');
+    g_CommBuf = (HV_SHM_REQUEST *)ExAllocatePool2(POOL_FLAG_NON_PAGED, HV_SHM_SIZE, 'vEdH');
     if (g_CommBuf) {
         RtlZeroMemory(g_CommBuf, HV_SHM_SIZE);
         PHYSICAL_ADDRESS commPa = MmGetPhysicalAddress(g_CommBuf);
