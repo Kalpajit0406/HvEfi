@@ -45,16 +45,16 @@
 
 [HvBoot] Probing hypervisor via authenticated VMCALL...
 [HvBoot] Calculated BootMagic: 0xF869878B883CC167
-[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x056C73A48F57D07F
+[+] [HvBoot] VMCALL DETECT SUCCEEDED! Nonce = 0x45AE01C800EF4BEE
 [HvReceipt] VMCALL DETECT SUCCESS
-[+] [HvBoot] Session Derived! SessionMagic = 0xABFA4EE2B5B277D6
+[+] [HvBoot] Session Derived! SessionMagic = 0xA896DCB0B1BDDD52
 [+] [HvBoot] Hypervisor Status: 0x0000000000010010 (vCPUs: 16, Running: 1)
 [HvReceipt] VMCALL STATUS vcpus=16
 [+] [HvBoot] HV_HYPERCALL_SELFTEST: PASSED! Hypervisor session authenticated.
 
 [HvReceipt] VMCALL SELFTEST PASS
 [HvReceipt] NOP VMCALL
-[HvReceipt] NOP st hi=90993572
+[HvReceipt] NOP st hi=1169031624
 [HvReceipt] HYPERVISOR RESIDENT
 [HvBoot] Connecting all UEFI device drivers...
 [HvBoot] ChainloadWindows: reading BootOrder...
