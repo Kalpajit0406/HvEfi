@@ -319,6 +319,14 @@ defer:
 
 // ── VMCALL handler ──────────────────────────────────────────────────────────
 
+static void HvInjectUd(void) {
+  UINT64 info = 6 | (3ULL << 8) | (1ULL << 31);
+  __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, info);
+  UINT64 len = 0;
+  __vmx_vmread(VMCS_EXIT_INSTR_LENGTH, &len);
+  __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, len);
+}
+
 static BOOLEAN HandleVmcall(PVCPU vcpu, PGUEST_REGS regs) {
   UINT64 magic = regs->Rcx;
   UINT64 id = regs->Rdx;
@@ -330,9 +338,7 @@ static BOOLEAN HandleVmcall(PVCPU vcpu, PGUEST_REGS regs) {
   UINT64 result = HvHypercallDispatch(vcpu, magic, id, p1, p2, p3, p4);
 
   if (result == HV_STATUS_NOT_OURS) {
-    UINT64 info = 6 | (3ULL << 8) | (1ULL << 31);
-    __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, info);
-    __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, 3);
+    HvInjectUd();
     return TRUE;
   }
 
@@ -904,11 +910,7 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     // execute. VT-x is reported present-but-firmware-disabled, so VMXON would
     // fail and none of these are usable; bare metal #UDs on all of them, and
     // so does this. Without this case they fell into default and spun.
-    UINT64 info = 6 | (3ULL << 8) | (1ULL << 31);
-    __vmx_vmwrite(VMCS_ENTRY_INTERRUPTION_INFO, info);
-    UINT64 len = 0;
-    __vmx_vmread(VMCS_EXIT_INSTR_LENGTH, &len);
-    __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, len);
+    HvInjectUd();
   } break;
 
   case EXIT_REASON_RDMSR:

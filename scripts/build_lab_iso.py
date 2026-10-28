@@ -1,12 +1,22 @@
 import os
 import sys
 import subprocess
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 import make_fat16
 
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, '..'))
+
 shell_path = r'C:\Users\DELL\edk2\Build\OvmfX64\DEBUG_VS2022\X64\Shell.efi'
-hvboot_path = r'F:\HvEfi\HvBoot_patched.efi'
-hvcore_path = r'F:\HvEfi\hvcore.efi'
-ticket_path = r'F:\HvEfi\hvticket'
+hvboot_path = os.path.join(REPO_ROOT, 'HvBoot_patched.efi')
+hvcore_path = os.path.join(REPO_ROOT, 'hvcore.efi')
+ticket_path = os.path.join(REPO_ROOT, 'hvticket')
+esp_img_path = os.path.join(REPO_ROOT, 'test_esp.img')
+iso_root = os.path.join(REPO_ROOT, 'iso_root')
+iso_out = os.path.join(REPO_ROOT, 'hvefi_boot.iso')
+
 
 with open(shell_path, 'rb') as f:
     shell_data = f.read()
@@ -55,10 +65,10 @@ fat_files = {
 }
 
 print("[*] Generating test_esp.img (16MB)...")
-make_fat16.make_fat16('F:/HvEfi/test_esp.img', 16, fat_files)
+make_fat16.make_fat16(esp_img_path, 16, fat_files)
 
 # Also stage to iso_root
-iso_root = r'F:\HvEfi\iso_root'
+# iso_root defined above
 os.makedirs(os.path.join(iso_root, 'EFI', 'Boot'), exist_ok=True)
 
 with open(os.path.join(iso_root, 'startup.nsh'), 'wb') as f:
@@ -81,9 +91,9 @@ oscdimg_exe = r'C:\Program Files\MiniTool Partition Wizard 13\oscdimg.exe'
 cmd = [
     oscdimg_exe,
     '-m', '-o', '-u2', '-udfver102',
-    '-bootdata:1#pEF,e,bF:\\HvEfi\\test_esp.img',
+    f'-bootdata:1#pEF,e,b{esp_img_path}',
     iso_root,
-    r'F:\HvEfi\hvefi_boot.iso'
+    iso_out
 ]
 
 res = subprocess.run(cmd, capture_output=True, text=True)

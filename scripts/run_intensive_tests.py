@@ -10,7 +10,8 @@ from PIL import Image
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
 VMX = r"C:\Users\DELL\Documents\Virtual Machines\Windows 11 x64\Windows 11 x64.vmx"
 SERIAL_LOG = r"C:\Users\DELL\Documents\Virtual Machines\Windows 11 x64\hvserial.log"
-RECEIPTS_DIR = r"F:\HvEfi\receipts"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+RECEIPTS_DIR = os.path.join(REPO_ROOT, "receipts")
 
 def stop_vm():
     print("[*] Stopping VM...")
@@ -33,7 +34,8 @@ def start_vm():
 
 def build_iso(mode='F'):
     print(f"[*] Building boot ISO with mode '{mode}'...")
-    res = subprocess.run([sys.executable, "build_lab_iso.py", mode], capture_output=True, text=True)
+    iso_script = os.path.join(os.path.dirname(__file__), "build_lab_iso.py")
+    res = subprocess.run([sys.executable, iso_script, mode], capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"ISO build failed:\n{res.stderr}\n{res.stdout}")
     print("[+] ISO build succeeded.")

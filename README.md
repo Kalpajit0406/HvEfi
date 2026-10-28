@@ -187,49 +187,77 @@ cmd.exe /c build_hvefi.bat
 
 ## Repository Layout
 
+Mirrors the clean modular separation of `illusion-rs`:
+
 ```
 HvEfi/
- |-- README.md                  This file
- |-- .gitignore                 Excludes compiled .efi, .obj, .zip
- |
- |-- HvEfi.inf                  EDK2 module descriptor (DXE_RUNTIME_DRIVER)
- |-- HvBoot.inf                 EDK2 module descriptor (UEFI_APPLICATION)
- |-- build_hvefi.bat            Build script (syncs to EDK2 workspace + builds)
- |-- check_sentinels.ps1        Post-build sentinel verification
- |
- |-- hv_efi_main.c              Driver entry point (12-step bring-up sequence)
- |-- hv_efi_vmx.c               VMX initialization (VMXON, MSR bitmap, host stack)
- |-- hv_vmcs.c                  VMCS setup (host + guest state per CPU)
- |-- hv_efi_ept.c               EPT identity map construction (WB/UC/4KB split)
- |-- hv_efi_smp.c               SMP bring-up (BSP + AP virtualization via MP Services)
- |-- hv_efi_hypercall.c         Hypercall dispatch + implementations
- |-- hv_exit.c                  VM-exit handler (CPUID, MSR, CR, EPT, VMCALL, SIPI)
- |-- hv_asm.asm                 Assembly (VMLAUNCH wrapper, VMCALL stub)
- |-- HvBoot.c                   Boot application (decision logic, receipt, rescue)
- |
- |-- hvdefs.h                   VMX constants, VMCS encodings, structures, macros
- |-- hv_efi.h                   EFI-specific includes and helpers
- |-- hv_efi_stage.h             Boot stage codes (POST-style progress reporting)
- |-- hv_efi_receipt.h           Receipt line definitions
- |-- hv_efi_bootcfg.h           Boot decision contract (HvBootDecide, HV_MAILBOX)
- |
- |-- HARDWARE_LADDER.md         Hardware bring-up test plan (B0/B1/B2 boots)
- |
- +-- shared/                    Headers shared with the kernel driver (HvDrv)
-      |-- hv_siphash.h          SipHash-2-4 implementation
-      |-- hv_ptwalk.h           x86-64 page table walker
-      |-- hv_copy.h             Page-chunked physical copy loop
-      |-- hv_auth.h             Hypercall authentication (SipHash MAC)
-      |-- hv_contract.h         Hypercall ID validation (shared between trees)
-      |-- hv_status.h           Status codes
-      |-- hv_segs.h             Segment descriptor helpers
-      |-- hv_xsave.h            XSAVE area size detection
-      |-- hv_ramrange.h         RAM range utilities
-      |-- hv_hostidt.h          Host IDT/GDT definitions
-      |-- hv_smp_index.h        Per-CPU index helpers
-      |-- hv_ept_decision.h     EPT violation decision logic
-      +-- HvDrv/
-           +-- hv_msr_contract.h  MSR interception list
+ ├── hypervisor/                Core VMX Type-1 hypervisor DXE driver
+ │    ├── HvEfi.inf             EDK2 module descriptor (DXE_RUNTIME_DRIVER)
+ │    ├── hv_efi_main.c         Driver entry point (13-step bring-up sequence)
+ │    ├── hv_efi_vmx.c          VMX initialization (VMXON, MSR bitmap, host stack)
+ │    ├── hv_vmcs.c             VMCS setup (host + guest state per CPU)
+ │    ├── hv_efi_ept.c          EPT identity map construction (WB/UC/4KB split)
+ │    ├── hv_efi_smp.c          SMP bring-up (BSP + AP virtualization via MP Services)
+ │    ├── hv_efi_hypercall.c    Hypercall dispatch + implementations
+ │    ├── hv_exit.c             VM-exit handler (CPUID, MSR, CR, EPT, VMCALL, SIPI)
+ │    ├── hv_asm.asm            Assembly (VMLAUNCH wrapper, VMCALL stub)
+ │    ├── hvdefs.h              VMX constants, VMCS encodings, structures, macros
+ │    ├── hv_efi.h              EFI-specific includes and helpers
+ │    ├── hv_efi_stage.h        Boot stage codes (POST-style progress reporting)
+ │    ├── hv_efi_receipt.h      Receipt line definitions
+ │    └── hv_efi_bootcfg.h      Boot decision contract (HvBootDecide, HV_MAILBOX)
+ │
+ ├── uefi/                      UEFI Bootloader application (bridge)
+ │    ├── HvBoot.inf            EDK2 module descriptor (UEFI_APPLICATION)
+ │    └── HvBoot.c              Boot application (decision logic, receipt, rescue)
+ │
+ ├── client/                    Windows userspace detection and hypercall test probes
+ │    ├── lab_detect.c          Authenticated VMCALL probe and feature test client
+ │    └── lab_detect.exe        Compiled Windows client executable
+ │
+ ├── shared/                    Headers shared with the kernel driver (HvDrv)
+ │    ├── hv_auth.h             Hypercall authentication (SipHash MAC)
+ │    ├── hv_contract.h         Hypercall ID validation (shared between trees)
+ │    ├── hv_copy.h             Page-chunked physical copy loop
+ │    ├── hv_ept_decision.h     EPT violation decision logic
+ │    ├── hv_ept_gen.h          EPT generator structures
+ │    ├── hv_hookpool.h         Shadow page pool definitions
+ │    ├── hv_hostidt.h          Host IDT/GDT definitions
+ │    ├── hv_ptwalk.h           x86-64 page table walker
+ │    ├── hv_ramrange.h         RAM range utilities
+ │    ├── hv_segs.h             Segment descriptor helpers
+ │    ├── hv_siphash.h          SipHash-2-4 implementation
+ │    ├── hv_smp_index.h        Per-CPU index helpers
+ │    ├── hv_status.h           Status codes and wire contract
+ │    ├── hv_xsave.h            XSAVE area size detection
+ │    └── HvDrv/
+ │         └── hv_msr_contract.h MSR interception list
+ │
+ ├── scripts/                   Automation, build, ISO generator, and intensive test harnesses
+ │    ├── build_lab_iso.py      Generates lab test FAT16/UDF boot ISO
+ │    ├── run_intensive_tests.py 7-stage intensive VMware test runner
+ │    ├── patch_sentinels.py    Patches runtime variable name & GUID sentinels
+ │    ├── check_sentinels.ps1   Verifies binary sentinels against launcher definitions
+ │    ├── make_fat16.py         Pure Python FAT16 filesystem generator
+ │    ├── configure_vmx.py      Configures VMware VMX for serial and VNC debugging
+ │    ├── test_vm.py            Quick headless VMware boot test
+ │    ├── vnc_capture.py        Headless VNC screenshot capture
+ │    ├── vnc_interact.py       Headless VNC keyboard automation
+ │    ├── decode_post.py        POST code telemetry decoder
+ │    └── decode_receipt.py     Mailbox receipt decoder
+ │
+ ├── docs/                      Architecture documentation, status logs, and analysis
+ │    ├── STATUS.md             Comprehensive 99-pass engineering changelog
+ │    ├── HARDWARE_LADDER.md    Hardware bring-up test plan (B0/B1/B2 boots)
+ │    ├── HVEFI_VERDICT_AND_IMPROVEMENTS.md Improvements & bug audit log
+ │    ├── BISECTION_STATUS.md   Dell bare-metal bisection results
+ │    └── CURRENT_CONDITION_AND_NEXT_STEPS.md Progress tracking & roadmap
+ │
+ ├── images/                    Screenshots and visual proofs
+ ├── receipts/                  Durable hardware and VMware boot logs
+ ├── build_hvefi.bat            Build script (syncs modular sources to EDK2 workspace + builds)
+ ├── README.md                  Project overview & instructions
+ └── LICENSE                    BSD 2-Clause / MIT License
 ```
 
 ## Troubleshooting

@@ -35,34 +35,50 @@ if not exist "%HV_EDK2_ROOT%\edksetup.bat" (
     exit /b 1
 )
 
+set "HV_SRC=%SRC%hypervisor\"
+set "UEFI_SRC=%SRC%uefi\"
+set "SHARED_SRC=%SRC%shared\"
+set "SCRIPTS_SRC=%SRC%scripts\"
+
 echo [*] Syncing HvEfi sources:
-echo       from %SRC%
+echo       from %SRC% (hypervisor, uefi, shared)
 echo       to   %DST%
 if not exist "%DST%" mkdir "%DST%"
 
-rem hv_efi_receipt.h is in this list because hv_efi_main.c includes it. A new
-rem header that is not listed here fails the build with C1083 - loud, but a
-rem header that is *only* listed in .inf's [Sources] would be a silent skip.
-rem HvBoot.inf/HvBoot.c are in the list because this script builds the bridge
-rem module too (see the second `build` invocation below).
-for %%F in (HvEfi.inf HvBoot.inf HvBoot.c hv_efi.h hv_efi_stage.h hv_efi_receipt.h hv_efi_bootcfg.h hv_efi_main.c hv_efi_vmx.c hv_efi_ept.c hv_efi_smp.c hv_efi_hypercall.c hv_exit.c hv_vmcs.c hvdefs.h hv_asm.asm) do (
-    if not exist "%SRC%%%F" (
-        echo [-] Missing source: %SRC%%%F
+for %%F in (HvEfi.inf hv_efi.h hv_efi_stage.h hv_efi_receipt.h hv_efi_bootcfg.h hv_efi_main.c hv_efi_vmx.c hv_efi_ept.c hv_efi_smp.c hv_efi_hypercall.c hv_exit.c hv_vmcs.c hvdefs.h hv_asm.asm) do (
+    if not exist "%HV_SRC%%%F" (
+        echo [-] Missing hypervisor source: %HV_SRC%%%F
         exit /b 1
     )
-    copy /y "%SRC%%%F" "%DST%\%%F" >nul || (
+    copy /y "%HV_SRC%%%F" "%DST%\%%F" >nul || (
         echo [-] Failed to copy %%F
         exit /b 1
     )
 )
 
-rem Verify the copies byte-for-byte. The copy loop already returns non-zero on
-rem failure, so this is for the case that actually bites: a source added to the
-rem repo but NOT added to the list above, which leaves the previous copy in the
-rem workspace building cleanly while nobody is reading that code. A stale
-rem workspace is indistinguishable from a fresh one by exit code and by output.
-pushd "%SRC%"
-for %%F in (HvEfi.inf HvBoot.inf HvBoot.c hv_efi.h hv_efi_stage.h hv_efi_receipt.h hv_efi_bootcfg.h hv_efi_main.c hv_efi_vmx.c hv_efi_ept.c hv_efi_smp.c hv_efi_hypercall.c hv_exit.c hv_vmcs.c hvdefs.h hv_asm.asm) do (
+for %%F in (HvBoot.inf HvBoot.c) do (
+    if not exist "%UEFI_SRC%%%F" (
+        echo [-] Missing uefi source: %UEFI_SRC%%%F
+        exit /b 1
+    )
+    copy /y "%UEFI_SRC%%%F" "%DST%\%%F" >nul || (
+        echo [-] Failed to copy %%F
+        exit /b 1
+    )
+)
+
+pushd "%HV_SRC%"
+for %%F in (HvEfi.inf hv_efi.h hv_efi_stage.h hv_efi_receipt.h hv_efi_bootcfg.h hv_efi_main.c hv_efi_vmx.c hv_efi_ept.c hv_efi_smp.c hv_efi_hypercall.c hv_exit.c hv_vmcs.c hvdefs.h hv_asm.asm) do (
+    fc /b "%%F" "%DST%\%%F" >nul || (
+        echo [-] Post-copy verification failed: %%F differs after copy
+        popd
+        exit /b 1
+    )
+)
+popd
+
+pushd "%UEFI_SRC%"
+for %%F in (HvBoot.inf HvBoot.c) do (
     fc /b "%%F" "%DST%\%%F" >nul || (
         echo [-] Post-copy verification failed: %%F differs after copy
         popd
@@ -186,9 +202,9 @@ if "%MISSING%"=="0" (
     copy /y "%OUT%" "%SRC%HvEfi.efi" >nul
     copy /y "%BOOTOUT%" "%SRC%HvBoot.efi" >nul
     echo [*] Provisioning dual sentinels for direct lab and USB deployment ...
-    python "%SRC%patch_sentinels.py" "%SRC%HvEfi.efi" "%SRC%hvcore_patched.efi"
+    python "%SCRIPTS_SRC%patch_sentinels.py" "%SRC%HvEfi.efi" "%SRC%hvcore_patched.efi"
     copy /y "%SRC%hvcore_patched.efi" "%SRC%hvcore.efi" >nul
-    python "%SRC%patch_sentinels.py" "%SRC%HvBoot.efi" "%SRC%HvBoot_patched.efi"
+    python "%SCRIPTS_SRC%patch_sentinels.py" "%SRC%HvBoot.efi" "%SRC%HvBoot_patched.efi"
 )
 
 rem ── Post-build contract checks ────────────────────────────────────────────
@@ -244,7 +260,7 @@ rem so the sentinel check is skipped. When building from the full Hypervisor
 rem repo, set HV_LAUNCHER_SRC to the launcher source path to enable it.
 if "%MISSING%"=="0" (
     if defined HV_LAUNCHER_SRC (
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%SRC%check_sentinels.ps1" -LauncherSource "%HV_LAUNCHER_SRC%" -Images "%OUT%;%BOOTOUT%;%SRC%HvEfi.efi;%SRC%HvBoot.efi"
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPTS_SRC%check_sentinels.ps1" -LauncherSource "%HV_LAUNCHER_SRC%" -Images "%OUT%;%BOOTOUT%;%SRC%HvEfi.efi;%SRC%HvBoot.efi"
         if errorlevel 1 (
             echo [!] Ticket sentinel check FAILED - see the diagnosis above.
             echo     The launcher would refuse these images as unpatchable.
