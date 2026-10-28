@@ -153,6 +153,60 @@ typedef struct _HV_IOCTL_HOOK {
     UINT64  Status;             // Out: Return status
 } HV_IOCTL_HOOK, *PHV_IOCTL_HOOK;
 
+// ── Shared Memory Beacon & Request Protocol (Manual-Mapped / Stealth Mode) ──
+
+#define HV_BEACON_PA                    0x1000ULL
+#define HV_BEACON_MAGIC                 0x4856505445434F4DULL  // "HVPTECOM"
+#define HV_BEACON_MAGIC2                (~HV_BEACON_MAGIC)
+
+#define HV_SHM_MAGIC                    0x50544531ULL          // 'PTE1'
+#define HV_SHM_SIZE                     (8 * 4096)
+#define HV_SHM_DATA_SIZE                4096
+
+// Shared memory handshake states
+#define HV_SHM_STATE_IDLE               0
+#define HV_SHM_STATE_REQUEST            1
+#define HV_SHM_STATE_DONE               2
+#define HV_SHM_STATE_SHUTDOWN           0xFF
+
+// Shared memory operation codes
+#define HV_SHM_OP_PING                  0x00
+#define HV_SHM_OP_READ_VIRT             0x01
+#define HV_SHM_OP_WRITE_VIRT            0x02
+#define HV_SHM_OP_GET_CR3               0x03
+#define HV_SHM_OP_TRANSLATE             0x04
+#define HV_SHM_OP_READ_PHYS             0x05
+#define HV_SHM_OP_WRITE_PHYS            0x06
+#define HV_SHM_OP_GET_KERNEL_BASE       0x07
+#define HV_SHM_OP_STATUS                0x08
+#define HV_SHM_OP_CAPABILITIES          0x09
+
+// Status codes
+#define HV_SHM_STATUS_OK                0
+#define HV_SHM_STATUS_FAIL              1
+#define HV_SHM_STATUS_BAD_PID           2
+#define HV_SHM_STATUS_BAD_ADDR          3
+#define HV_SHM_STATUS_BAD_SIZE          4
+
+typedef struct _HV_BEACON {
+    UINT64 Magic;
+    UINT64 CommVA;
+    UINT64 CommPA;
+    UINT64 Magic2;
+} HV_BEACON, *PHV_BEACON;
+
+typedef struct _HV_SHM_REQUEST {
+    volatile LONG  Lock;         // HV_SHM_STATE_*
+    UINT32         OpCode;       // HV_SHM_OP_*
+    UINT32         Status;       // HV_SHM_STATUS_*
+    UINT32         Pid;          // Target PID
+    UINT64         Address;      // Virtual or physical address
+    UINT64         Size;         // Bytes to read/write
+    UINT64         Result;       // Returned value (CR3, PA, etc.)
+    UINT64         Magic;        // HV_SHM_MAGIC
+    UINT8          Data[HV_SHM_DATA_SIZE];
+} HV_SHM_REQUEST, *PHV_SHM_REQUEST;
+
 #pragma pack(pop)
 
 #endif // HV_IOCTL_H

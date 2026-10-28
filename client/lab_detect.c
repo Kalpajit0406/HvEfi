@@ -11,6 +11,7 @@
 #if __has_include("../shared/hv_siphash.h")
 #include "../shared/hv_siphash.h"
 #include "../shared/hv_status.h"
+#include "../shared/hv_ioctl.h"
 #elif __has_include("shared/hv_siphash.h")
 #include "shared/hv_siphash.h"
 #include "shared/hv_status.h"
@@ -148,6 +149,69 @@ static void PrintHelp(const char *prog) {
     printf("  --help                 Display this help message\n");
 }
 
+static bool RunDriverTests(bool optJson, uint64_t targetPa, uint32_t targetPid, uint64_t targetVa, uint32_t readLen) {
+    HANDLE hDev = CreateFileA(HV_USER_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hDev == INVALID_HANDLE_VALUE) {
+        if (!optJson) printf("[-] Failed to open device %s (Error=%lu). Ensure HvDrv service is started.\n",
+                             HV_USER_DEVICE_NAME, GetLastError());
+        return false;
+    }
+
+    if (!optJson) printf("[+] Successfully opened handle to %s\n", HV_USER_DEVICE_NAME);
+
+    // 1. IOCTL_HV_DETECT
+    HV_IOCTL_DETECT det = {0};
+    DWORD bytes = 0;
+    if (DeviceIoControl(hDev, IOCTL_HV_DETECT, &det, sizeof(det), &det, sizeof(det), &bytes, NULL)) {
+        if (!optJson) printf("[+] IOCTL_HV_DETECT: Nonce=0x%016llX, Status=0x%llX\n", det.Nonce, det.Status);
+    }
+
+    // 2. IOCTL_HV_QUERY_STATUS
+    HV_IOCTL_STATUS st = {0};
+    if (DeviceIoControl(hDev, IOCTL_HV_QUERY_STATUS, &st, sizeof(st), &st, sizeof(st), &bytes, NULL)) {
+        if (!optJson) printf("[+] IOCTL_HV_QUERY_STATUS: VcpuCount=%u, Running=%u, RawStatusWord=0x%016llX\n",
+                             st.VcpuCount, st.Running, st.RawStatusWord);
+    }
+
+    // 3. IOCTL_HV_SELFTEST
+    UINT64 selftestStatus = (UINT64)-1;
+    if (DeviceIoControl(hDev, IOCTL_HV_SELFTEST, NULL, 0, &selftestStatus, sizeof(selftestStatus), &bytes, NULL)) {
+        if (!optJson) printf("[+] IOCTL_HV_SELFTEST: Status=0x%llX (%s)\n",
+                             selftestStatus, selftestStatus == 0 ? "PASSED" : "FAILED");
+    }
+
+    // 4. IOCTL_HV_CAPABILITIES
+    HV_IOCTL_CAPABILITIES caps = {0};
+    if (DeviceIoControl(hDev, IOCTL_HV_CAPABILITIES, &caps, sizeof(caps), &caps, sizeof(caps), &bytes, NULL)) {
+        if (!optJson) printf("[+] IOCTL_HV_CAPABILITIES: AbiVersion=%u, SupportedBitmask=0x%016llX\n",
+                             caps.AbiVersion, caps.SupportedBitmask);
+    }
+
+    // 5. IOCTL_HV_GET_KERNEL_BASE
+    HV_IOCTL_KERNEL_BASE kb = {0};
+    if (DeviceIoControl(hDev, IOCTL_HV_GET_KERNEL_BASE, &kb, sizeof(kb), &kb, sizeof(kb), &bytes, NULL)) {
+        if (!optJson) printf("[+] IOCTL_HV_GET_KERNEL_BASE: ntoskrnl VA=0x%016llX, Status=0x%llX\n",
+                             kb.KernelBase, kb.Status);
+    }
+
+    // 6. Optional Physical Read
+    if (targetPa != 0) {
+        HV_IOCTL_READ_PHYS rp = {0};
+        rp.PhysicalAddress = targetPa;
+        rp.Size = (readLen > 4096) ? 4096 : readLen;
+        if (DeviceIoControl(hDev, IOCTL_HV_READ_PHYS, &rp, sizeof(rp), &rp, sizeof(rp), &bytes, NULL)) {
+            if (!optJson) {
+                printf("[+] IOCTL_HV_READ_PHYS: PA=0x%016llX, Size=%u, Status=0x%llX\n",
+                       rp.PhysicalAddress, rp.Size, rp.Status);
+                HexDump(rp.Buffer, rp.Size, rp.PhysicalAddress);
+            }
+        }
+    }
+
+    CloseHandle(hDev);
+    return true;
+}
+
 static uint64_t AuthVmcall(uint64_t sessionMagic, uint64_t key0, uint64_t key1,
                            uint64_t *pSeq, uint64_t id,
                            uint64_t p1, uint64_t p2, uint64_t p3) {
@@ -169,6 +233,7 @@ int main(int argc, char **argv) {
     bool optKernelBase = false;
     bool optInvept = false;
     bool optJson = false;
+    bool optDriver = false;
 
     uint32_t benchIterations = 1000;
     uint64_t targetPa = 0;
@@ -213,9 +278,21 @@ int main(int argc, char **argv) {
                     return 1;
                 }
             }
+        } else if (strcmp(argv[i], "--driver") == 0) {
+            optDriver = true;
         } else if (strcmp(argv[i], "--json") == 0) {
             optJson = true;
         }
+    }
+
+    if (optDriver) {
+        if (!optJson) {
+            printf("=================================================================\n");
+            printf("[*] HvEfi Companion Driver Verification (IOCTL Bridge Mode)\n");
+            printf("=================================================================\n");
+        }
+        bool ok = RunDriverTests(optJson, targetPa, targetPid, targetVa, readLen);
+        return ok ? 0 : 1;
     }
 
     AutoDiscoverTicket();

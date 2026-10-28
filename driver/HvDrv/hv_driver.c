@@ -22,6 +22,11 @@ static PDEVICE_OBJECT g_DeviceObject = NULL;
 static UNICODE_STRING g_DeviceName;
 static UNICODE_STRING g_SymLinkName;
 
+static HV_SHM_REQUEST *g_CommBuf        = NULL;
+static UINT64          g_CommPA         = 0;
+static HANDLE          g_ThreadHandle   = NULL;
+static volatile LONG   g_WorkerShutdown = 0;
+
 static UINT8  g_Ticket[32] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
@@ -324,63 +329,232 @@ NTSTATUS HvDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     return status;
 }
 
+// ── Shared-Memory / Manual-Mapped Request Handling (Inspired by Kratos) ──
+
+static void HvHandleShmRequest(HV_SHM_REQUEST *req) {
+    req->Status = HV_SHM_STATUS_FAIL;
+    req->Result = 0;
+
+    if (req->Magic != HV_SHM_MAGIC)
+        return;
+
+    switch (req->OpCode) {
+    case HV_SHM_OP_PING:
+        req->Result = HV_SHM_MAGIC;
+        req->Status = HV_SHM_STATUS_OK;
+        break;
+
+    case HV_SHM_OP_GET_CR3: {
+        UINT64 cr3 = HvAuthVmcall(0x0004 /* GET_CR3 */, req->Pid, 0, 0);
+        req->Result = cr3;
+        req->Status = (cr3 != 0 && cr3 != (UINT64)-1) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_BAD_PID;
+        break;
+    }
+
+    case HV_SHM_OP_TRANSLATE: {
+        UINT64 pa = HvAuthVmcall(0x0003 /* TRANSLATE */, 0 /* cr3 */, req->Address, 0);
+        req->Result = pa;
+        req->Status = (pa != 0 && pa != (UINT64)-1) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_BAD_ADDR;
+        break;
+    }
+
+    case HV_SHM_OP_READ_VIRT: {
+        if (req->Size == 0 || req->Size > HV_SHM_DATA_SIZE) {
+            req->Status = HV_SHM_STATUS_BAD_SIZE;
+            break;
+        }
+        UINT64 pAndS = ((UINT64)req->Size << 32) | (UINT64)req->Pid;
+        UINT64 st = HvAuthVmcall(0x000E /* READ_VIRT */, pAndS, req->Address, (UINT64)(UINTN)req->Data);
+        req->Result = st;
+        req->Status = (st == 0) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_FAIL;
+        break;
+    }
+
+    case HV_SHM_OP_WRITE_VIRT: {
+        if (req->Size == 0 || req->Size > HV_SHM_DATA_SIZE) {
+            req->Status = HV_SHM_STATUS_BAD_SIZE;
+            break;
+        }
+        UINT64 pAndS = ((UINT64)req->Size << 32) | (UINT64)req->Pid;
+        UINT64 st = HvAuthVmcall(0x000F /* WRITE_VIRT */, pAndS, req->Address, (UINT64)(UINTN)req->Data);
+        req->Result = st;
+        req->Status = (st == 0) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_FAIL;
+        break;
+    }
+
+    case HV_SHM_OP_READ_PHYS: {
+        if (req->Size == 0 || req->Size > HV_SHM_DATA_SIZE) {
+            req->Status = HV_SHM_STATUS_BAD_SIZE;
+            break;
+        }
+        UINT64 st = HvAuthVmcall(0x0001 /* READ_PHYS */, req->Address, (UINT64)(UINTN)req->Data, req->Size);
+        req->Result = st;
+        req->Status = (st == 0) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_FAIL;
+        break;
+    }
+
+    case HV_SHM_OP_WRITE_PHYS: {
+        if (req->Size == 0 || req->Size > HV_SHM_DATA_SIZE) {
+            req->Status = HV_SHM_STATUS_BAD_SIZE;
+            break;
+        }
+        UINT64 st = HvAuthVmcall(0x0002 /* WRITE_PHYS */, req->Address, (UINT64)(UINTN)req->Data, req->Size);
+        req->Result = st;
+        req->Status = (st == 0) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_FAIL;
+        break;
+    }
+
+    case HV_SHM_OP_GET_KERNEL_BASE: {
+        req->Result = HvAuthVmcall(0x0010 /* GET_KERNEL_BASE */, 0, 0, 0);
+        req->Status = (req->Result != 0) ? HV_SHM_STATUS_OK : HV_SHM_STATUS_FAIL;
+        break;
+    }
+
+    case HV_SHM_OP_STATUS: {
+        req->Result = HvAuthVmcall(0x0006 /* QUERY_STATUS */, 0, 0, 0);
+        req->Status = HV_SHM_STATUS_OK;
+        break;
+    }
+
+    case HV_SHM_OP_CAPABILITIES: {
+        req->Result = HvAuthVmcall(0x000B /* CAPABILITIES */, 0, 0, 0);
+        req->Status = HV_SHM_STATUS_OK;
+        break;
+    }
+
+    default:
+        req->Status = HV_SHM_STATUS_FAIL;
+        break;
+    }
+}
+
+static VOID HvWorkerThread(PVOID context) {
+    UNREFERENCED_PARAMETER(context);
+    HV_SHM_REQUEST *req = g_CommBuf;
+    LARGE_INTEGER interval;
+    interval.QuadPart = -20000; // 2 ms poll
+
+    KdPrint(("[HvDrv] Stealth worker thread active.\n"));
+
+    while (!g_WorkerShutdown) {
+        if (InterlockedCompareExchange(&req->Lock,
+                HV_SHM_STATE_REQUEST, HV_SHM_STATE_REQUEST) == HV_SHM_STATE_REQUEST) {
+            HvHandleShmRequest(req);
+            _ReadWriteBarrier();
+            InterlockedExchange(&req->Lock, HV_SHM_STATE_DONE);
+        } else {
+            KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        }
+    }
+
+    KdPrint(("[HvDrv] Stealth worker thread exiting.\n"));
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
 // ── Unload & DriverEntry ────────────────────────────────────────────────────
 
 VOID HvDriverUnload(PDRIVER_OBJECT DriverObject) {
     UNREFERENCED_PARAMETER(DriverObject);
     KdPrint(("[HvDrv] Driver unloading...\n"));
 
+    if (g_ThreadHandle) {
+        g_WorkerShutdown = 1;
+    }
+
     IoDeleteSymbolicLink(&g_SymLinkName);
     if (g_DeviceObject) {
         IoDeleteDevice(g_DeviceObject);
         g_DeviceObject = NULL;
     }
+
+    if (g_CommBuf) {
+        ExFreePoolWithTag(g_CommBuf, 'vEdH');
+        g_CommBuf = NULL;
+    }
+
     KdPrint(("[HvDrv] Driver unloaded cleanly.\n"));
 }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
     UNREFERENCED_PARAMETER(RegistryPath);
-    KdPrint(("[HvDrv] DriverEntry loading...\n"));
-
-    RtlInitUnicodeString(&g_DeviceName, HV_DEVICE_NAME_W);
-    RtlInitUnicodeString(&g_SymLinkName, HV_DOS_DEVICE_NAME_W);
-
-    NTSTATUS status = IoCreateDevice(
-        DriverObject,
-        0,
-        &g_DeviceName,
-        HV_DEVICE_TYPE,
-        FILE_DEVICE_SECURE_OPEN,
-        FALSE,
-        &g_DeviceObject
-    );
-
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("[HvDrv] Failed to create device object: 0x%08X\n", status));
-        return status;
-    }
-
-    status = IoCreateSymbolicLink(&g_SymLinkName, &g_DeviceName);
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("[HvDrv] Failed to create symbolic link: 0x%08X\n", status));
-        IoDeleteDevice(g_DeviceObject);
-        g_DeviceObject = NULL;
-        return status;
-    }
-
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = HvCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE]  = HvCreateClose;
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = HvDeviceControl;
-    DriverObject->DriverUnload = HvDriverUnload;
-
-    g_DeviceObject->Flags |= DO_BUFFERED_IO;
-    g_DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+    KdPrint(("[HvDrv] DriverEntry loading (DriverObject=%p)...\n", DriverObject));
 
     // Attempt early hypervisor discovery
     if (HvInitializeSession(NULL)) {
         KdPrint(("[HvDrv] Successfully paired with resident HvEfi hypervisor!\n"));
     } else {
-        KdPrint(("[HvDrv] HvEfi hypervisor not yet detected; will retry on first IOCTL.\n"));
+        KdPrint(("[HvDrv] HvEfi hypervisor not yet detected; will retry on first request.\n"));
+    }
+
+    // ── Mode 1: Standard WDM Service Mode ───────────────────────────────────
+    if (DriverObject != NULL) {
+        RtlInitUnicodeString(&g_DeviceName, HV_DEVICE_NAME_W);
+        RtlInitUnicodeString(&g_SymLinkName, HV_DOS_DEVICE_NAME_W);
+
+        NTSTATUS status = IoCreateDevice(
+            DriverObject,
+            0,
+            &g_DeviceName,
+            HV_DEVICE_TYPE,
+            FILE_DEVICE_SECURE_OPEN,
+            FALSE,
+            &g_DeviceObject
+        );
+
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("[HvDrv] Failed to create device object: 0x%08X\n", status));
+            return status;
+        }
+
+        status = IoCreateSymbolicLink(&g_SymLinkName, &g_DeviceName);
+        if (!NT_SUCCESS(status)) {
+            KdPrint(("[HvDrv] Failed to create symbolic link: 0x%08X\n", status));
+            IoDeleteDevice(g_DeviceObject);
+            g_DeviceObject = NULL;
+            return status;
+        }
+
+        DriverObject->MajorFunction[IRP_MJ_CREATE] = HvCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_CLOSE]  = HvCreateClose;
+        DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = HvDeviceControl;
+        DriverObject->DriverUnload = HvDriverUnload;
+
+        g_DeviceObject->Flags |= DO_BUFFERED_IO;
+        g_DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+        KdPrint(("[HvDrv] Standard WDM device initialized successfully.\n"));
+    }
+
+    // ── Mode 2: Stealth Shared-Memory / Manual-Mapped Mode (Kratos-Compatible) ─
+    // Always initialize the shared-memory comm buffer & beacon at PA 0x1000 so
+    // either mapped drivers or usermode callers without device handles can communicate.
+    g_CommBuf = (HV_SHM_REQUEST *)ExAllocatePoolWithTag(NonPagedPool, HV_SHM_SIZE, 'vEdH');
+    if (g_CommBuf) {
+        RtlZeroMemory(g_CommBuf, HV_SHM_SIZE);
+        PHYSICAL_ADDRESS commPa = MmGetPhysicalAddress(g_CommBuf);
+        g_CommPA = (UINT64)commPa.QuadPart;
+
+        HV_BEACON beacon;
+        beacon.Magic = HV_BEACON_MAGIC;
+        beacon.CommVA = (UINT64)g_CommBuf;
+        beacon.CommPA = g_CommPA;
+        beacon.Magic2 = HV_BEACON_MAGIC2;
+
+        // Publish beacon at PA 0x1000 via hypervisor physical write
+        HvAuthVmcall(0x0002 /* WRITE_PHYS */, HV_BEACON_PA, (UINT64)(UINTN)&beacon, sizeof(beacon));
+
+        NTSTATUS threadStatus = PsCreateSystemThread(
+            &g_ThreadHandle,
+            THREAD_ALL_ACCESS,
+            NULL,
+            NULL,
+            NULL,
+            HvWorkerThread,
+            NULL
+        );
+        if (NT_SUCCESS(threadStatus)) {
+            KdPrint(("[HvDrv] Shared-memory beacon published at PA 0x%llX (CommVA=0x%llX, CommPA=0x%llX)\n",
+                     HV_BEACON_PA, (UINT64)g_CommBuf, g_CommPA));
+        }
     }
 
     KdPrint(("[HvDrv] DriverEntry completed successfully.\n"));

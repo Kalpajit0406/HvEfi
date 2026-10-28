@@ -504,6 +504,25 @@ every boot that reached VMLAUNCH. Both were live, and both have been addressed.
 
 ---
 
+## Companion Driver (HvDrv) & Advanced Stealth Architecture
+
+Following comprehensive analysis of `F:\Kratos` and `illusion-rs`, HvEfi implements an end-to-end Windows Ring 0 companion bridge:
+
+1. **Dual-Mode Driver Architecture (`driver/HvDrv/`)**:
+   - **Mode 1 (Standard WDM Service)**: Creates `\Device\HvDrv` and symbolic link `\\.\HvDrv`, processing buffered IOCTLs from userspace.
+   - **Mode 2 (Manual-Mapped / Driverless Stealth Mode)**: Safely handles `DriverObject == NULL` (when loaded via `ukay_mapper`, `kdmapper`, or `iqvw64e.sys`), bypassing SSDT/WDM object creation. Allocates non-paged comm buffer, publishes physical beacon at PA `0x1000` (`HV_BEACON_MAGIC = 0x4856505445434F4DULL`), and spawns a background worker thread (`PsCreateSystemThread`) to service shared-memory request packets.
+
+2. **Windows Runtime Verification Suite (`client/lab_detect.exe`)**:
+   - Supports direct Ring-3/Ring-0 VMCALL execution with automated ticket auto-discovery.
+   - Supports `--driver` flag to route diagnostic commands and memory access through `\\.\HvDrv` kernel IOCTLs.
+   - Latency benchmarking (`--bench`) measuring CPU cycle cost per hypercall.
+
+3. **Hypervisor Stealth Enhancements**:
+   - **Hardware CR4 Read Shadowing**: Sets `VMCS_CR4_GUEST_HOST_MASK = CR4_VMXE` and `VMCS_CR4_READ_SHADOW = cr4 & ~CR4_VMXE`, returning `VMXE = 0` to guest `MOV from CR4` with zero VM exits.
+   - **Dynamic TSC Latency Compensation**: Measures VM-exit duration via `__rdtsc()` and deducts it from `VMCS_TSC_OFFSET` on every resume to defeat anti-cheat timing delta loops.
+
+---
+
 ## Contributing — Where Help is Needed
 
 1. **Hardware testing**: Testing on different Intel platforms (especially
