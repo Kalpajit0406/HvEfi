@@ -812,7 +812,6 @@ static void HandleCrAccess(PVCPU vcpu, PGUEST_REGS regs) {
 // ── Main VM-exit dispatcher ─────────────────────────────────────────────────
 
 BOOLEAN HvExitHandler(PGUEST_REGS regs) {
-  UINT64 exitEntryTsc = __rdtsc();
   PVCPU vcpu = HvGetCurrentVcpu();
   if (!vcpu)
     return HvDevirtualizeThisCpu(NULL, HV_DEVIRT_NO_VCPU);
@@ -1238,12 +1237,12 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   }
 
   if (resume) {
-    UINT64 exitDuration = __rdtsc() - exitEntryTsc;
-    // Normalize TSC so guest perceived execution time does not jump across
-    // the VM-exit. Compensates for hypervisor execution latency.
-    UINT64 tscOffset = 0;
-    __vmx_vmread(VMCS_TSC_OFFSET, &tscOffset);
-    __vmx_vmwrite(VMCS_TSC_OFFSET, tscOffset - exitDuration);
+    // Keep VMCS_TSC_OFFSET strictly unified and invariant across all vCPUs
+    // (set to g_Hv.TscBootOffset during VMCS setup). Never deduct exitDuration
+    // per-exit locally: doing so leaks clock ticks between BSP and APs, breaking
+    // Windows Boot Manager and Windows Kernel multi-core invariant TSC checks
+    // (CLOCK_WATCHDOG_TIMEOUT / KeQueryPerformanceCounter skew).
+    // Instruction-level latency compensation is handled by CpuidTimingPad.
   }
 
   return resume;
