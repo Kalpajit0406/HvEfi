@@ -194,7 +194,28 @@ void HvCalibrateCpuidLatency(void) {
 }
 
 static void CpuidTimingPad(UINT64 entryTsc) {
-  (void)entryTsc;
+  if (entryTsc == 0 || g_Hv.CpuidPadTarget == 0) {
+    return;
+  }
+
+  // Floor = the calibrated p99 (or the 200 fallback); the per-call jitter is
+  // derived from the in-flight TSC so the padded latency is a range rather
+  // than a hard floor. Stateless on purpose — several vCPUs run this
+  // concurrently and g_Hv.CpuidPad* are read-only after calibration.
+  UINT64 target = entryTsc + g_Hv.CpuidPadTarget;
+  UINT32 jitter = g_Hv.CpuidPadJitter;
+  if (jitter != 0) {
+    target += (UINT32)(HvRandomU64() % ((UINT64)jitter + 1));
+  }
+
+  // Safety bound: prevent runaway spinning if TSC jumps or target is stale
+  UINT64 maxBound = entryTsc + HV_CPUID_PAD_MAX + 128;
+  while (__rdtsc() < target) {
+    if (__rdtsc() > maxBound) {
+      break;
+    }
+    _mm_pause();
+  }
 }
 
 static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {

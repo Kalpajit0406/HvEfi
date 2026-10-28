@@ -305,7 +305,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // to enable VMX traps to HandleCrAccess instead of raising an unhandled
     // hardware #GP(0) (Intel SDM Vol 3C §25.1.3). For native AP bringup, non-VMX
     // CR4 writes (PAE, PSE, etc.) match the read shadow and execute natively.
-    // Step 0: CR0 and CR4 masks zeroed
+    // CR0 unmasked for native AP transition; CR4_VMXE masked with read-shadow hiding CR4.VMXE
     HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, 0);
     HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE);
     HvVmWriteChecked(VMCS_CR0_READ_SHADOW,     cr0);
@@ -317,7 +317,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // VPID - unique per vCPU (0 is invalid)
     HvVmWriteChecked(VMCS_VPID, (UINT64)(vcpu->ProcessorIndex + 1));
 
-    // Step 0: EPT ON (1:1 identity map)
+    // EPT enabled with 1:1 identity map and decoy hiding
     HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer);
 
     // VMCS link pointer = -1 (no shadow VMCS)
