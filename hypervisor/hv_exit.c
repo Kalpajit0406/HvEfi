@@ -786,6 +786,7 @@ static void HandleCrAccess(PVCPU vcpu, PGUEST_REGS regs) {
 // ── Main VM-exit dispatcher ─────────────────────────────────────────────────
 
 BOOLEAN HvExitHandler(PGUEST_REGS regs) {
+  UINT64 exitEntryTsc = __rdtsc();
   PVCPU vcpu = HvGetCurrentVcpu();
   if (!vcpu)
     return HvDevirtualizeThisCpu(NULL, HV_DEVIRT_NO_VCPU);
@@ -1208,6 +1209,15 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
         }
       }
     }
+  }
+
+  if (resume) {
+    UINT64 exitDuration = __rdtsc() - exitEntryTsc;
+    // Normalize TSC so guest perceived execution time does not jump across
+    // the VM-exit. Compensates for hypervisor execution latency.
+    UINT64 tscOffset = 0;
+    __vmx_vmread(VMCS_TSC_OFFSET, &tscOffset);
+    __vmx_vmwrite(VMCS_TSC_OFFSET, tscOffset - exitDuration);
   }
 
   return resume;

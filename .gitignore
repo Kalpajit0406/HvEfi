@@ -10,9 +10,10 @@
 *.iso
 *.img
 *.bin
+*.sys
 
 # Logs & temporary test files
-
+*.log
 *.png
 hvticket
 build_manifest.txt

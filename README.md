@@ -44,6 +44,9 @@ A bare-metal Type-1 hypervisor that loads as a UEFI DXE runtime driver before th
 - **Kernel base discovery** via IDT #PF handler walk + MZ signature scan
 - **Per-page hiding** with decoy page redirection in EPT
 - **Bounds-checked physical reads** (`ReadPhysU64Safe`) — prevents VMX-root crash on corrupted guest page tables
+- **Hardware CR4 Read Shadowing** — CR4.VMXE masked in VMCS_CR4_GUEST_HOST_MASK and zeroed in VMCS_CR4_READ_SHADOW, guest MOV from CR4 returns VMXE=0 with zero VM-exits
+- **Dynamic RDTSC Latency Compensation** — VM-exit execution duration (__rdtsc() - exitEntryTsc) is deducted from VMCS_TSC_OFFSET on every resume, defeating timing-delta anti-cheat heuristics
+- **Windows Kernel Companion Driver (HvDrv.sys)** — WDM kernel driver with IOCTL interface and direct Ring 0 authenticated VMCALL dispatch
 
 ## Hypercall Interface
 
@@ -210,6 +213,13 @@ HvEfi/
  ├── uefi/                      UEFI Bootloader application (bridge)
  │    ├── HvBoot.inf            EDK2 module descriptor (UEFI_APPLICATION)
  │    └── HvBoot.c              Boot application (decision logic, receipt, rescue)
+ │
+ ├── driver/                      Windows WDM companion kernel driver (Ring 0)
+ │    ├── HvDrv/
+ │    │    ├── hv_driver.c          Driver entry, dispatch routines, and authenticated IOCTLs
+ │    │    └── hv_asm.asm             Raw x64 VMCALL dispatch assembly stub
+ │    ├── build_driver.bat        Standalone WDK10 MSVC x64 build script
+ │    └── manage_driver.bat       Service management helper (create/start/stop/delete)
  │
  ├── client/                    Windows userspace detection and hypercall test probes
  │    ├── lab_detect.c          Authenticated VMCALL probe and feature test client

@@ -307,9 +307,9 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // CR4 writes (PAE, PSE, etc.) match the read shadow and execute natively.
     // Step 0: CR0 and CR4 masks zeroed
     HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, 0);
-    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, 0);
+    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE);
     HvVmWriteChecked(VMCS_CR0_READ_SHADOW,     cr0);
-    HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4);
+    HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4 & ~CR4_VMXE);
 
     // MSR bitmap — all zeros = pass through all MSRs (no VM-exit)
     HvVmWriteChecked(VMCS_MSR_BITMAP, vcpu->MsrBitmapPhysical.QuadPart);

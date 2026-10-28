@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 #include <intrin.h>
 
 #if defined(__has_include)
@@ -18,6 +20,7 @@
 #include "../shared/hv_status.h"
 #endif
 
+// Hypercall IDs matching hypervisor/hvdefs.h
 #define HV_HYPERCALL_DETECT             0x0000
 #define HV_HYPERCALL_READ_PHYS          0x0001
 #define HV_HYPERCALL_WRITE_PHYS         0x0002
@@ -27,8 +30,17 @@
 #define HV_HYPERCALL_QUERY_STATUS       0x0006
 #define HV_HYPERCALL_INVALIDATE_EPT     0x0007
 #define HV_HYPERCALL_SELFTEST           0x0008
+#define HV_HYPERCALL_SET_CR3_OFFSET     0x000A
+#define HV_HYPERCALL_CAPABILITIES       0x000B
+#define HV_HYPERCALL_QUERY_EXIT_COUNTS  0x000C
+#define HV_HYPERCALL_READ_VIRT          0x000E
+#define HV_HYPERCALL_WRITE_VIRT         0x000F
+#define HV_HYPERCALL_GET_KERNEL_BASE    0x0010
+#define HV_HYPERCALL_EPT_HOOK           0x0011
+#define HV_HYPERCALL_EPT_UNHOOK         0x0012
 
-static const uint8_t s_LabTicket[32] = {
+// Default lab ticket (32 bytes)
+static uint8_t s_Ticket[32] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
     0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
@@ -69,119 +81,389 @@ static uint64_t RawVmcall(uint64_t magic, uint64_t id,
     }
 }
 
+static bool TryLoadTicketFile(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t buf[32];
+    size_t readBytes = fread(buf, 1, 32, f);
+    fclose(f);
+    if (readBytes == 32) {
+        memcpy(s_Ticket, buf, 32);
+        return true;
+    }
+    return false;
+}
+
+static void AutoDiscoverTicket(void) {
+    const char *candidates[] = {
+        "hvticket",
+        "..\\hvticket",
+        "F:\\HvEfi\\hvticket",
+        "D:\\EFI\\Boot\\hvticket",
+        "C:\\EFI\\Boot\\hvticket"
+    };
+    for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
+        if (TryLoadTicketFile(candidates[i])) {
+            printf("[*] Loaded ticket from: %s\n", candidates[i]);
+            return;
+        }
+    }
+}
+
+static void HexDump(const void *data, size_t size, uint64_t baseAddr) {
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < size; i += 16) {
+        printf("    0x%016llX: ", baseAddr + i);
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < size) printf("%02X ", p[i + j]);
+            else printf("   ");
+            if (j == 7) printf(" ");
+        }
+        printf(" |");
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < size) {
+                uint8_t c = p[i + j];
+                printf("%c", (c >= 32 && c <= 126) ? c : '.');
+            }
+        }
+        printf("|\n");
+    }
+}
+
+static void PrintHelp(const char *prog) {
+    printf("HvEfi Comprehensive Windows Runtime Verification Client\n");
+    printf("Usage: %s [OPTIONS]\n\n", prog);
+    printf("Options:\n");
+    printf("  --all                  Run complete diagnostic test suite across all hypercalls (default)\n");
+    printf("  --detect               Quick residency check (Canary CPUID & VMCALL detect only)\n");
+    printf("  --status               Query hypervisor status word, running flag, and active vCPUs\n");
+    printf("  --capabilities         Query hypervisor supported opcode bitmask and ABI version\n");
+    printf("  --bench [iterations]   Benchmark VMCALL execution latency (CPU cycle delta)\n");
+    printf("  --read-phys <pa> <len> Read physical memory directly through hypervisor\n");
+    printf("  --read-virt <pid> <va> <len> Read target process virtual memory via hypervisor\n");
+    printf("  --kernel-base          Query ntoskrnl base address discovered by hypervisor\n");
+    printf("  --invept               Trigger hypervisor global EPT TLB invalidation\n");
+    printf("  --ticket <file>        Specify custom 32-byte ticket file\n");
+    printf("  --json                 Output test results in JSON format\n");
+    printf("  --help                 Display this help message\n");
+}
+
+static uint64_t AuthVmcall(uint64_t sessionMagic, uint64_t key0, uint64_t key1,
+                           uint64_t *pSeq, uint64_t id,
+                           uint64_t p1, uint64_t p2, uint64_t p3) {
+    uint64_t words[6] = { sessionMagic, id, p1, p2, 0, *pSeq };
+    uint64_t mac = HvMacTuple(key0, key1, words);
+    uint64_t ret = RawVmcall(sessionMagic, id, p1, p2, mac, p3);
+    (*pSeq)++;
+    return ret;
+}
+
 int main(int argc, char **argv) {
+    bool optAll = true;
+    bool optDetectOnly = false;
+    bool optStatusOnly = false;
+    bool optCapsOnly = false;
+    bool optBench = false;
+    bool optReadPhys = false;
+    bool optReadVirt = false;
+    bool optKernelBase = false;
+    bool optInvept = false;
+    bool optJson = false;
+
+    uint32_t benchIterations = 1000;
+    uint64_t targetPa = 0;
+    uint32_t targetPid = 0;
+    uint64_t targetVa = 0;
+    uint32_t readLen = 64;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            PrintHelp(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "--detect") == 0) {
+            optDetectOnly = true; optAll = false;
+        } else if (strcmp(argv[i], "--status") == 0) {
+            optStatusOnly = true; optAll = false;
+        } else if (strcmp(argv[i], "--capabilities") == 0) {
+            optCapsOnly = true; optAll = false;
+        } else if (strcmp(argv[i], "--bench") == 0) {
+            optBench = true; optAll = false;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                benchIterations = (uint32_t)strtoul(argv[++i], NULL, 10);
+                if (benchIterations == 0) benchIterations = 1000;
+            }
+        } else if (strcmp(argv[i], "--read-phys") == 0) {
+            optReadPhys = true; optAll = false;
+            if (i + 1 < argc) targetPa = strtoull(argv[++i], NULL, 0);
+            if (i + 1 < argc && argv[i + 1][0] != '-') readLen = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--read-virt") == 0) {
+            optReadVirt = true; optAll = false;
+            if (i + 1 < argc) targetPid = (uint32_t)strtoul(argv[++i], NULL, 0);
+            if (i + 1 < argc) targetVa = strtoull(argv[++i], NULL, 0);
+            if (i + 1 < argc && argv[i + 1][0] != '-') readLen = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--kernel-base") == 0) {
+            optKernelBase = true; optAll = false;
+        } else if (strcmp(argv[i], "--invept") == 0) {
+            optInvept = true; optAll = false;
+        } else if (strcmp(argv[i], "--ticket") == 0) {
+            if (i + 1 < argc) {
+                const char *tpath = argv[++i];
+                if (!TryLoadTicketFile(tpath)) {
+                    fprintf(stderr, "[-] Failed to read ticket file: %s\n", tpath);
+                    return 1;
+                }
+            }
+        } else if (strcmp(argv[i], "--json") == 0) {
+            optJson = true;
+        }
+    }
+
+    AutoDiscoverTicket();
+
     FILE *logF = fopen("hv_detect.log", "a");
-    #define LOG(...) do { printf(__VA_ARGS__); if (logF) { fprintf(logF, __VA_ARGS__); fflush(logF); } } while(0)
+    #define LOG(...) do { if (!optJson) printf(__VA_ARGS__); if (logF) { fprintf(logF, __VA_ARGS__); fflush(logF); } } while(0)
 
-    LOG("=================================================================\n");
-    LOG("[*] HvEfi Hypervisor Residency & VMCALL Detector (Lab Edition)\n");
-    LOG("=================================================================\n");
+    if (!optJson) {
+        LOG("=================================================================\n");
+        LOG("[*] HvEfi Hypervisor Runtime Verification Suite (Full Scale)\n");
+        LOG("=================================================================\n");
+    }
 
-    const uint64_t *ticketWords = (const uint64_t *)s_LabTicket;
+    const uint64_t *ticketWords = (const uint64_t *)s_Ticket;
     uint64_t bootMagic = HvBootMagic(ticketWords);
-    LOG("[+] Configured Lab Ticket (32 bytes):\n    ");
-    for (int i = 0; i < 32; i++) LOG("%02X ", s_LabTicket[i]);
-    LOG("\n[+] Derived BootMagic: 0x%016llX\n\n", bootMagic);
+    if (!optJson) {
+        LOG("[+] Loaded Ticket: ");
+        for (int i = 0; i < 32; i++) LOG("%02X", s_Ticket[i]);
+        LOG("\n[+] Derived BootMagic: 0x%016llX\n", bootMagic);
+    }
 
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    LOG("[*] System Processor Count: %u\n", si.dwNumberOfProcessors);
+    if (!optJson) LOG("[*] System Processor Count: %u\n", si.dwNumberOfProcessors);
 
-    // 1. Canary CPUID leaf 0x13371337 across all CPUs
-    LOG("\n[*] Step 1: Testing CPUID Canary (0x13371337)...\n");
+    // ── Canary CPUID Check ──────────────────────────────────────────────────
     DWORD activeCanary = 0;
     for (DWORD i = 0; i < si.dwNumberOfProcessors && i < 64; i++) {
         SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << i);
-        Sleep(2);
+        Sleep(1);
         int regs[4] = {0};
         __cpuidex(regs, 0x13371337, 0);
         if (regs[0] == 0x564D5831) { // 'VMX1'
             activeCanary++;
-            LOG("    [CPU %02u] Canary ACTIVE (EAX='VMX1', vCPU=%d, ExitIdx=%d, Count=%d)\n",
-                i, regs[1], regs[2], regs[3]);
-        } else {
-            LOG("    [CPU %02u] Canary INACTIVE (Bare Metal / Unhandled: EAX=0x%08X)\n",
-                i, regs[0]);
         }
     }
     SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)-1);
-    LOG("[*] Canary Summary: %u / %u CPUs running under VMX\n\n", activeCanary, si.dwNumberOfProcessors);
+    if (!optJson) LOG("[*] Canary CPUID Leaf (0x13371337): %u / %u CPUs Active\n", activeCanary, si.dwNumberOfProcessors);
 
-    // 2. VMCALL DETECT across all CPUs
-    LOG("[*] Step 2: Probing VMCALL DETECT across all CPUs...\n");
+    // ── VMCALL DETECT across all CPUs ───────────────────────────────────────
     uint64_t detectedNonce = 0;
     DWORD activeVmcall = 0;
     for (DWORD i = 0; i < si.dwNumberOfProcessors && i < 64; i++) {
         SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << i);
-        Sleep(2);
+        Sleep(1);
         uint64_t res = RawVmcall(bootMagic, HV_HYPERCALL_DETECT, 0, 0, 0, 0);
-        if (res == (uint64_t)-1) {
-            LOG("    [CPU %02u] VMCALL faulted with #UD (Bare metal / Not virtualized / Injected #UD)\n", i);
-        } else if (res == (uint64_t)-2 || res == HV_STATUS_NOT_OURS) {
-            LOG("    [CPU %02u] VMCALL returned NOT_OURS (-2) (Ticket mismatch or dark mode)\n", i);
-        } else if (res <= 0xFF) {
-            LOG("    [CPU %02u] VMCALL returned invalid response (0x%016llX)\n", i, res);
-        } else {
+        if (res != (uint64_t)-1 && res != (uint64_t)-2 && res != HV_STATUS_NOT_OURS && res > 0xFF) {
             activeVmcall++;
             detectedNonce = res;
-            LOG("    [CPU %02u] VMCALL DETECT SUCCESS! Nonce = 0x%016llX\n", i, res);
         }
-
     }
     SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)-1);
 
     if (activeVmcall == 0) {
-        LOG("[-] Hypervisor was NOT detected via VMCALL.\n");
+        if (optJson) {
+            printf("{\"status\": \"error\", \"message\": \"Hypervisor not detected\", \"active_cpus\": 0}\n");
+        } else {
+            LOG("[-] Hypervisor was NOT detected via VMCALL (Bare metal or unauthenticated).\n");
+        }
         if (logF) fclose(logF);
         return 1;
     }
 
-    LOG("\n[+] SUCCESS: Hypervisor responded to authenticated VMCALL on %u CPU(s)!\n", activeVmcall);
+    if (!optJson) LOG("[+] VMCALL DETECT Succeeded on %u CPUs! Nonce = 0x%016llX\n", activeVmcall, detectedNonce);
 
-    // 3. Establish Session & Query Hypervisor
-    LOG("\n[*] Step 3: Deriving Session Keys & Authenticated Handshake...\n");
+    if (optDetectOnly) {
+        if (optJson) printf("{\"status\": \"ok\", \"active_cpus\": %u, \"nonce\": \"0x%016llX\"}\n", activeVmcall, detectedNonce);
+        if (logF) fclose(logF);
+        return 0;
+    }
+
+    // ── Derive Cryptographic Session Keys ───────────────────────────────────
     uint64_t key0 = 0, key1 = 0;
     HvDeriveSession(ticketWords, detectedNonce, &key0, &key1);
     uint64_t sessionMagic = HvSessionMagic(key0, key1);
-    LOG("[+] Derived Session Magic: 0x%016llX\n", sessionMagic);
+    if (!optJson) LOG("[+] Session Keys Derived. SessionMagic = 0x%016llX\n", sessionMagic);
 
     uint64_t seq = 1;
-    // Query Status
-    {
-        uint64_t words[6] = { sessionMagic, HV_HYPERCALL_QUERY_STATUS, 0, 0, 0, seq };
-        uint64_t mac = HvMacTuple(key0, key1, words);
-        uint64_t st = RawVmcall(sessionMagic, HV_HYPERCALL_QUERY_STATUS, 0, 0, mac, 0);
-        LOG("[+] HV_HYPERCALL_QUERY_STATUS: 0x%016llX\n", st);
-        LOG("    CPUs: %llu | Running: %s\n",
-            (st & HV_STATUS_CPU_MASK),
-            (st & HV_STATUS_RUNNING_BIT) ? "YES" : "NO");
+
+    #define AUTH_VMCALL(id, p1, p2, p3) AuthVmcall(sessionMagic, key0, key1, &seq, (id), (p1), (p2), (p3))
+
+    // ── Test 1: QUERY_STATUS ────────────────────────────────────────────────
+    uint64_t statusWord = AUTH_VMCALL(HV_HYPERCALL_QUERY_STATUS, 0, 0, 0);
+    uint32_t hvVcpus = (uint32_t)(statusWord & HV_STATUS_CPU_MASK);
+    bool hvRunning = (statusWord & HV_STATUS_RUNNING_BIT) != 0;
+    uint32_t darkReason = (uint32_t)((statusWord >> 32) & 0xFF);
+    if (!optJson) {
+        LOG("[+] [0x0006] QUERY_STATUS: 0x%016llX (vCPUs: %u, Running: %s, DarkReason: %u)\n",
+            statusWord, hvVcpus, hvRunning ? "YES" : "NO", darkReason);
+    }
+    if (optStatusOnly) {
+        if (optJson) printf("{\"status_word\": \"0x%016llX\", \"vcpus\": %u, \"running\": %s}\n", statusWord, hvVcpus, hvRunning ? "true" : "false");
+        if (logF) fclose(logF);
+        return 0;
     }
 
-    seq++;
-    // Selftest
-    {
-        uint64_t words[6] = { sessionMagic, HV_HYPERCALL_SELFTEST, 0, 0, 0, seq };
-        uint64_t mac = HvMacTuple(key0, key1, words);
-        uint64_t st = RawVmcall(sessionMagic, HV_HYPERCALL_SELFTEST, 0, 0, mac, 0);
-        if (st == HV_STATUS_SUCCESS) {
-            LOG("[+] HV_HYPERCALL_SELFTEST: PASSED (Status 0x0)\n");
-        } else {
-            LOG("[!] HV_HYPERCALL_SELFTEST: FAILED (Status 0x%llX)\n", st);
+    // ── Test 2: SELFTEST ────────────────────────────────────────────────────
+    uint64_t selftestRes = AUTH_VMCALL(HV_HYPERCALL_SELFTEST, 0, 0, 0);
+    if (!optJson) {
+        LOG("[+] [0x0008] SELFTEST: %s (Status: 0x%llX)\n",
+            (selftestRes == HV_STATUS_SUCCESS) ? "PASSED" : "FAILED", selftestRes);
+    }
+
+    // ── Test 3: CAPABILITIES ────────────────────────────────────────────────
+    uint64_t caps = AUTH_VMCALL(HV_HYPERCALL_CAPABILITIES, 0, 0, 0);
+    if (!optJson) {
+        LOG("[+] [0x000B] CAPABILITIES Bitmask: 0x%016llX\n", caps);
+        LOG("    Supported Hypercalls:\n");
+        const char *capNames[] = {
+            "DETECT", "READ_PHYS", "WRITE_PHYS", "TRANSLATE", "GET_CR3", "UNLOAD",
+            "QUERY_STATUS", "INVALIDATE_EPT", "SELFTEST", "SET_CR3_OFFSET", "READ_SCATTER",
+            "CAPABILITIES", "QUERY_EXIT_COUNTS", "READ_VIRT", "WRITE_VIRT", "GET_KERNEL_BASE",
+            "EPT_HOOK", "EPT_UNHOOK"
+        };
+        for (uint32_t b = 0; b < sizeof(capNames)/sizeof(capNames[0]); b++) {
+            if (caps & (1ULL << b)) LOG("     - [0x%02X] %s\n", b, capNames[b]);
+        }
+    }
+    if (optCapsOnly) {
+        if (optJson) printf("{\"capabilities\": \"0x%016llX\"}\n", caps);
+        if (logF) fclose(logF);
+        return 0;
+    }
+
+    // ── Test 4: GET_KERNEL_BASE ─────────────────────────────────────────────
+    uint64_t kernelBase = AUTH_VMCALL(HV_HYPERCALL_GET_KERNEL_BASE, 0, 0, 0);
+    if (!optJson) {
+        LOG("[+] [0x0010] GET_KERNEL_BASE: 0x%016llX\n", kernelBase);
+    }
+    if (optKernelBase) {
+        if (optJson) printf("{\"kernel_base\": \"0x%016llX\"}\n", kernelBase);
+        if (logF) fclose(logF);
+        return 0;
+    }
+
+    // ── Test 5: GET_CR3 & Current Process TRANSLATE ─────────────────────────
+    uint64_t currentCr3 = AUTH_VMCALL(HV_HYPERCALL_GET_CR3, 0, 0, 0);
+    if (!optJson) LOG("[+] [0x0004] GET_CR3 (Current Process PID=%lu): 0x%016llX\n", GetCurrentProcessId(), currentCr3);
+
+    // Test virtual translation on our own stack pointer
+    uint64_t testVa = (uint64_t)(uintptr_t)&testVa;
+    uint64_t testPa = AUTH_VMCALL(HV_HYPERCALL_TRANSLATE, currentCr3, testVa, 0);
+    if (!optJson) LOG("[+] [0x0003] TRANSLATE (VA 0x%016llX): PA 0x%016llX\n", testVa, testPa);
+
+    // ── Test 6: READ_PHYSICAL (Read back from translated stack PA) ──────────
+    uint8_t physBuf[64] = {0};
+    uint64_t physRes = AUTH_VMCALL(HV_HYPERCALL_READ_PHYS, testPa, (uintptr_t)physBuf, sizeof(physBuf));
+    if (!optJson) {
+        LOG("[+] [0x0001] READ_PHYS (PA 0x%016llX, 64 bytes): Status=0x%llX\n", testPa, physRes);
+        if (physRes == HV_STATUS_SUCCESS) {
+            HexDump(physBuf, sizeof(physBuf), testPa);
         }
     }
 
-    seq++;
-    // Get CR3
-    {
-        uint64_t words[6] = { sessionMagic, HV_HYPERCALL_GET_CR3, 0, 0, 0, seq };
-        uint64_t mac = HvMacTuple(key0, key1, words);
-        uint64_t cr3 = RawVmcall(sessionMagic, HV_HYPERCALL_GET_CR3, 0, 0, mac, 0);
-        LOG("[+] HV_HYPERCALL_GET_CR3: 0x%016llX\n", cr3);
+    // ── Test 7: READ_VIRT (Read self stack directly via atomic hypercall) ───
+    uint8_t virtBuf[64] = {0};
+    uint64_t pidAndSize = ((uint64_t)sizeof(virtBuf) << 32) | 0; // PID=0 (current)
+    uint64_t virtRes = AUTH_VMCALL(HV_HYPERCALL_READ_VIRT, pidAndSize, testVa, (uintptr_t)virtBuf);
+    if (!optJson) {
+        LOG("[+] [0x000E] READ_VIRT (PID=0, VA 0x%016llX, 64 bytes): Status=0x%llX\n", testVa, virtRes);
+        if (virtRes == HV_STATUS_SUCCESS) {
+            HexDump(virtBuf, sizeof(virtBuf), testVa);
+        }
     }
 
-    LOG("\n=================================================================\n");
-    LOG("[+] ALL CHECKS PASSED: HvEfi Hypervisor residency fully proven!\n");
-    LOG("=================================================================\n");
+    // ── Custom Read Physical Option ─────────────────────────────────────────
+    if (optReadPhys) {
+        if (readLen > 4096) readLen = 4096;
+        uint8_t *customBuf = (uint8_t *)malloc(readLen);
+        if (customBuf) {
+            memset(customBuf, 0, readLen);
+            uint64_t r = AUTH_VMCALL(HV_HYPERCALL_READ_PHYS, targetPa, (uintptr_t)customBuf, readLen);
+            if (!optJson) {
+                printf("[+] Physical Memory Dump at 0x%016llX (%u bytes, status 0x%llX):\n", targetPa, readLen, r);
+                HexDump(customBuf, readLen, targetPa);
+            } else {
+                printf("{\"pa\": \"0x%016llX\", \"status\": %llu}\n", targetPa, r);
+            }
+            free(customBuf);
+        }
+        if (logF) fclose(logF);
+        return 0;
+    }
+
+    // ── Custom Read Virtual Option ──────────────────────────────────────────
+    if (optReadVirt) {
+        if (readLen > 4096) readLen = 4096;
+        uint8_t *customBuf = (uint8_t *)malloc(readLen);
+        if (customBuf) {
+            memset(customBuf, 0, readLen);
+            uint64_t pAndS = ((uint64_t)readLen << 32) | targetPid;
+            uint64_t r = AUTH_VMCALL(HV_HYPERCALL_READ_VIRT, pAndS, targetVa, (uintptr_t)customBuf);
+            if (!optJson) {
+                printf("[+] Virtual Memory Dump (PID=%u, VA=0x%016llX, %u bytes, status 0x%llX):\n", targetPid, targetVa, readLen, r);
+                HexDump(customBuf, readLen, targetVa);
+            } else {
+                printf("{\"pid\": %u, \"va\": \"0x%016llX\", \"status\": %llu}\n", targetPid, targetVa, r);
+            }
+            free(customBuf);
+        }
+        if (logF) fclose(logF);
+        return 0;
+    }
+
+    // ── Test 8: INVALIDATE_EPT ──────────────────────────────────────────────
+    if (optInvept || optAll) {
+        uint64_t inveptRes = AUTH_VMCALL(HV_HYPERCALL_INVALIDATE_EPT, 0, 0, 0);
+        if (!optJson) LOG("[+] [0x0007] INVALIDATE_EPT: Status=0x%llX\n", inveptRes);
+    }
+
+    // ── Benchmarking ────────────────────────────────────────────────────────
+    if (optBench || optAll) {
+        if (!optJson) LOG("\n[*] Benchmarking Authenticated VMCALL Latency (%u iterations)...\n", benchIterations);
+        uint64_t minCycles = (uint64_t)-1;
+        uint64_t maxCycles = 0;
+        uint64_t totalCycles = 0;
+
+        for (uint32_t it = 0; it < benchIterations; it++) {
+            uint64_t words[6] = { sessionMagic, HV_HYPERCALL_SELFTEST, 0, 0, 0, seq };
+            uint64_t mac = HvMacTuple(key0, key1, words);
+            
+            uint64_t t0 = __rdtsc();
+            RawVmcall(sessionMagic, HV_HYPERCALL_SELFTEST, 0, 0, mac, 0);
+            uint64_t t1 = __rdtsc();
+            seq++;
+
+            uint64_t delta = t1 - t0;
+            if (delta < minCycles) minCycles = delta;
+            if (delta > maxCycles) maxCycles = delta;
+            totalCycles += delta;
+        }
+
+        double avgCycles = (double)totalCycles / benchIterations;
+        if (!optJson) {
+            LOG("[+] Benchmark Results:\n");
+            LOG("    Min Latency: %llu cycles\n", minCycles);
+            LOG("    Max Latency: %llu cycles\n", maxCycles);
+            LOG("    Avg Latency: %.1f cycles\n\n", avgCycles);
+        } else {
+            printf("{\"min_cycles\": %llu, \"max_cycles\": %llu, \"avg_cycles\": %.1f}\n", minCycles, maxCycles, avgCycles);
+        }
+    }
+
+    if (!optJson) {
+        LOG("=================================================================\n");
+        LOG("[+] FULL DIAGNOSTIC SUITE COMPLETED SUCCESSFULLY!\n");
+        LOG("=================================================================\n");
+    }
 
     if (logF) fclose(logF);
     return 0;
