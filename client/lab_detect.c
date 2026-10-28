@@ -5,8 +5,18 @@
 #include <stdbool.h>
 #include <intrin.h>
 
+#if defined(__has_include)
+#if __has_include("../shared/hv_siphash.h")
+#include "../shared/hv_siphash.h"
+#include "../shared/hv_status.h"
+#elif __has_include("shared/hv_siphash.h")
 #include "shared/hv_siphash.h"
 #include "shared/hv_status.h"
+#endif
+#else
+#include "../shared/hv_siphash.h"
+#include "../shared/hv_status.h"
+#endif
 
 #define HV_HYPERCALL_DETECT             0x0000
 #define HV_HYPERCALL_READ_PHYS          0x0001
