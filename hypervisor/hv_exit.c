@@ -194,6 +194,15 @@ void HvCalibrateCpuidLatency(void) {
 }
 
 static void CpuidTimingPad(UINT64 entryTsc) {
+#ifdef HV_EFI_BUILD
+  // Disable active timing padding during EFI boot phase (before ExitBootServices).
+  // bootmgfw.efi runs tight CPUID calibration loops during GOP mode switch and AP bringup;
+  // busy-waiting in root mode compounds latency and triggers InsydeH2O SMM / GOP timeouts.
+  if (g_Mailbox == NULL || !(g_Mailbox->FlagsSeq & HV_MAILBOX_FLAG_EBS_OK)) {
+    return;
+  }
+#endif
+
   if (entryTsc == 0 || g_Hv.CpuidPadTarget == 0) {
     return;
   }
@@ -1021,6 +1030,10 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     }
     break;
 
+  case EXIT_REASON_DR_ACCESS:
+    AdvanceGuestRip();
+    break;
+
   case EXIT_REASON_APIC_WRITE:
   case EXIT_REASON_VIRTUALIZED_EOI:
   case EXIT_REASON_TPR_BELOW:
@@ -1237,6 +1250,26 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   }
 
   if (resume) {
+    // Synchronize IA32E_MODE_GUEST entry control with guest EFER.LMA.
+    // When an AP transitions from real mode to long mode via SIPI, hardware
+    // sets EFER.LMA when CR0.PG is enabled with EFER.LME=1.
+    // Intel SDM Vol 3C §26.3.1.1 requires that if EFER.LMA=1, IA32E_MODE_GUEST
+    // must be 1. If CR0 writes do not trap (CR0 mask is 0), synchronize here
+    // before every VM-entry to guarantee valid guest state.
+    UINT64 guestEfer = 0;
+    __vmx_vmread(VMCS_GUEST_EFER, &guestEfer);
+    UINT64 entryCtls = 0;
+    __vmx_vmread(VMCS_ENTRY_CONTROLS, &entryCtls);
+    if (guestEfer & EFER_LMA) {
+      if (!(entryCtls & (UINT64)ENTRY_CTRL_IA32E_MODE_GUEST)) {
+        __vmx_vmwrite(VMCS_ENTRY_CONTROLS, entryCtls | (UINT64)ENTRY_CTRL_IA32E_MODE_GUEST);
+      }
+    } else {
+      if (entryCtls & (UINT64)ENTRY_CTRL_IA32E_MODE_GUEST) {
+        __vmx_vmwrite(VMCS_ENTRY_CONTROLS, entryCtls & ~(UINT64)ENTRY_CTRL_IA32E_MODE_GUEST);
+      }
+    }
+
     // Keep VMCS_TSC_OFFSET strictly unified and invariant across all vCPUs
     // (set to g_Hv.TscBootOffset during VMCS setup). Never deduct exitDuration
     // per-exit locally: doing so leaks clock ticks between BSP and APs, breaking
