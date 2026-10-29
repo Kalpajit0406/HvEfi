@@ -190,6 +190,12 @@ typedef struct {
 
     // Host fault counter (Pass 107)
     unsigned int HostFaultCount;
+
+    // Visual GOP On-Screen Telemetry (Pass 109)
+    unsigned int GopFrameBufferBaseLow;
+    unsigned int GopFrameBufferBaseHigh;
+    unsigned int GopWidth;
+    unsigned int GopHeight;
 } HV_MAILBOX;
 
 // Core Exclusion Mask accessors

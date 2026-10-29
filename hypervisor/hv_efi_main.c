@@ -223,6 +223,7 @@ static VOID EFIAPI HvEfiOnExitBootServices(EFI_EVENT ev, VOID *ctx) {
     // here). HvBoot writes the receipt's "FULL EBS" line when StartImage
     // returns success, which is the rescue-rule completion signal.
     HvMailboxSetFlag(g_Mailbox, HV_MAILBOX_FLAG_EBS_OK);
+    HvDrawDebugBox(0x00FF00); // Visual Green on ExitBootServices
 
     // Publish any EPT mutation so every processor invalidates at its own next
     // VM exit - i.e. as Windows takes over. Store-only, which is why it is

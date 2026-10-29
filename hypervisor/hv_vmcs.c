@@ -242,16 +242,11 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
     HvVmWriteChecked(VMCS_TSC_OFFSET, 0);
 
-    // Secondary: EPT, RDTSCP, INVPCID, XSAVES, unrestricted guest.
-    // In UEFI boot phase, do NOT enable PROC2_ENABLE_VPID:
-    // Without VPID, Intel hardware automatically flushes all linear mappings
-    // and combined mappings on EVERY VM-exit and VM-entry (Intel SDM Vol 3C §28.3.2.1).
-    // This guarantees 100% clean TLB state when bootmgfw.efi transitions page
-    // tables and GOP video modes.
+    // Secondary: EPT, RDTSCP, INVPCID, XSAVES, VPID, unrestricted guest.
     UINT32 procCtls2 = AdjustControls(
         PROC2_ENABLE_EPT | PROC2_ENABLE_RDTSCP |
         PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES |
-        PROC2_UNRESTRICTED_GUEST,
+        PROC2_ENABLE_VPID | PROC2_UNRESTRICTED_GUEST,
         MSR_IA32_VMX_PROCBASED_CTLS2);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS2, procCtls2);
 
@@ -309,9 +304,9 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // CR4 writes (PAE, PSE, etc.) match the read shadow and execute natively.
     // CR0 unmasked for native AP transition; CR4_VMXE masked with read-shadow hiding CR4.VMXE
     HvVmWriteChecked(VMCS_CR0_GUEST_HOST_MASK, 0);
-    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE);
+    HvVmWriteChecked(VMCS_CR4_GUEST_HOST_MASK, CR4_VMXE | CR4_SMXE | CR4_CET);
     HvVmWriteChecked(VMCS_CR0_READ_SHADOW,     cr0);
-    HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4 & ~CR4_VMXE);
+    HvVmWriteChecked(VMCS_CR4_READ_SHADOW,     cr4 & ~(CR4_VMXE | CR4_SMXE | CR4_CET));
 
     // MSR bitmap — all zeros = pass through all MSRs (no VM-exit)
     HvVmWriteChecked(VMCS_MSR_BITMAP, vcpu->MsrBitmapPhysical.QuadPart);
@@ -412,6 +407,7 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
 
     HvVmWriteChecked(VMCS_GUEST_CR0, cr0);
     HvVmWriteChecked(VMCS_GUEST_CR3, cr3);
+    cr4 &= ~(CR4_SMXE | CR4_CET);
     HvVmWriteChecked(VMCS_GUEST_CR4, cr4);
     HvVmWriteChecked(VMCS_GUEST_DR7, dr7);
 

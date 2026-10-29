@@ -239,19 +239,15 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
 
   UINT32 out[4] = {0, 0, 0, 0};
 
-  // Bare metal replica: mask hypervisor synthetic leaves (0x40000000 - 0x400000FF)
-  // On bare metal Intel hardware, leaves > max basic leaf return max basic leaf data.
-  // In VMware, 0x40000000 returns "Microsoft Hv", tricking Windows into using Hyper-V
-  // synthetic timers without an enlightened hypervisor to service their interrupts.
+  // Mask hypervisor synthetic leaves (0x40000000 - 0x400000FF) to all zeroes.
+  // Returning all zeros guarantees that Windows Boot Manager (bootmgfw.efi) and
+  // the Windows Kernel detect NO hypervisor enlightenment interface and never
+  // attempt synthetic timer WRMSRs or enlightenments.
   if (leaf >= 0x40000000 && leaf <= 0x400000FF) {
-    int maxLeaf[4] = {0};
-    __cpuid(maxLeaf, 0);
-    int r[4] = {0};
-    __cpuidex(r, maxLeaf[0], (int)subleaf);
-    regs->Rax = (UINT32)r[0];
-    regs->Rbx = (UINT32)r[1];
-    regs->Rcx = (UINT32)r[2];
-    regs->Rdx = (UINT32)r[3];
+    regs->Rax = 0;
+    regs->Rbx = 0;
+    regs->Rcx = 0;
+    regs->Rdx = 0;
     CpuidTimingPad(entryTsc);
     AdvanceGuestRip();
     return TRUE;
@@ -276,7 +272,20 @@ static BOOLEAN HandleCpuid(PVCPU vcpu, PGUEST_REGS regs) {
 
   if (leaf == 1) {
     out[2] &= ~(1u << 5);    // mask VMX (ECX bit 5) to prevent nested virtualization conflict
-    out[2] &= ~(1u << 31);   // hypervisor present
+    out[2] &= ~(1u << 6);    // mask SMX (ECX bit 6: Safer Mode Extensions) to prevent GETSEC unconditional VM-exit
+    out[2] &= ~(1u << 31);   // mask hypervisor present (ECX bit 31)
+  }
+  if (leaf == 7) {
+    if (subleaf == 0) {
+      out[1] &= ~(1u << 2);    // mask SGX (EBX bit 2: Software Guard Extensions) to prevent ENCLS VM-exit
+      out[2] &= ~(1u << 7);    // mask CET_SS (ECX bit 7: Shadow Stack) to prevent unhandled CET #CP faults
+      out[3] &= ~(1u << 20);   // mask CET_IBT (EDX bit 20: Indirect Branch Tracking)
+    } else if (subleaf == 1) {
+      out[0] &= ~(1u << 18);   // mask CET_SSS (EAX bit 18: Supervisor Shadow Stack)
+    }
+  }
+  if (leaf == 0xD && subleaf == 1) {
+    out[2] &= ~((1u << 11) | (1u << 12)); // mask CET_U and CET_S supervisor states in XSS
   }
 
   regs->Rax = out[0];
@@ -599,6 +608,24 @@ static void HandleRdmsr(PVCPU vcpu, PGUEST_REGS regs) {
     __vmx_vmread(VMCS_GUEST_EFER, &val);
     break;
 
+  case 0x6A0: // IA32_U_CET
+  case 0x6A2: // IA32_S_CET
+  case 0x6A4: // IA32_PL0_SSP
+  case 0x6A5: // IA32_PL1_SSP
+  case 0x6A6: // IA32_PL2_SSP
+  case 0x6A7: // IA32_PL3_SSP
+  case 0x6A8: // IA32_INTERRUPT_SSP_TABLE_ADDR
+    val = 0;
+    break;
+
+  case 0xDA0: // IA32_XSS
+    if (HvAsmReadMsrSafe(msr, &val)) {
+      val &= ~((1ULL << 11) | (1ULL << 12));
+    } else {
+      val = 0;
+    }
+    break;
+
   // NOTE: no 0x3B (IA32_TSC_ADJUST) case. The EFI VCPU deliberately has no
   // TscAdjust shadow (see hvdefs.h): the MSR passes through to hardware
   // untouched, so RDMSR(0x3B) reads the true hardware value via default.
@@ -656,6 +683,24 @@ static void HandleWrmsr(PVCPU vcpu, PGUEST_REGS regs) {
     return;
   case MSR_IA32_EFER:
     __vmx_vmwrite(VMCS_GUEST_EFER, val);
+    break;
+
+  case 0x6A0: // IA32_U_CET
+  case 0x6A2: // IA32_S_CET
+  case 0x6A4: // IA32_PL0_SSP
+  case 0x6A5: // IA32_PL1_SSP
+  case 0x6A6: // IA32_PL2_SSP
+  case 0x6A7: // IA32_PL3_SSP
+  case 0x6A8: // IA32_INTERRUPT_SSP_TABLE_ADDR
+    // Silently ignore CET writes; CET is disabled in CPUID and CR4
+    break;
+
+  case 0xDA0: // IA32_XSS
+    val &= ~((1ULL << 11) | (1ULL << 12));
+    if (!HvAsmWriteMsrSafe(msr, val)) {
+      HvInjectGp();
+      return;
+    }
     break;
   // NOTE: no 0x3B (IA32_TSC_ADJUST) write case. It passes through to
   // hardware untouched; shadowing it here would desync RDMSR from RDTSC
@@ -749,11 +794,16 @@ static void HandleCrAccess(PVCPU vcpu, PGUEST_REGS regs) {
 
     case 4:
       // FIXED0 already includes VMXE, ensuring VMCS_GUEST_CR4 satisfies hardware
-      // VM-entry checks. The read shadow presents CR4 without VMXE to the guest.
+      // VM-entry checks. The read shadow presents CR4 without VMXE/SMXE/CET to the guest.
       cur = (*gprSlot | __readmsr(MSR_IA32_VMX_CR4_FIXED0)) &
             __readmsr(MSR_IA32_VMX_CR4_FIXED1);
+      // Strip CR4_SMXE and CR4_CET:
+      // Under Intel SDM Vol 3C §26.3.1.1, if 'load CET state' VM-entry control is 0,
+      // guest CR4.CET MUST be 0, or VM-entry fails with VMENTRY_FAIL_GUEST_STATE.
+      // Similarly, guest CR4.SMXE must be 0 because SMX is masked in CPUID.
+      cur &= ~(CR4_SMXE | CR4_CET);
       HvVmWriteLog(VMCS_GUEST_CR4, cur);
-      HvVmWriteLog(VMCS_CR4_READ_SHADOW, cur & ~CR4_VMXE);
+      HvVmWriteLog(VMCS_CR4_READ_SHADOW, cur & ~(CR4_VMXE | CR4_SMXE | CR4_CET));
       break;
 
     case 8:
@@ -888,6 +938,14 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
   }
 
   BOOLEAN resume = TRUE;
+
+  if (reason == EXIT_REASON_EPT_VIOLATION) {
+    HvDrawDebugBox(0xFF00FF); // Purple on EPT violation
+  } else if (reason == EXIT_REASON_GETSEC) {
+    HvDrawDebugBox(0xFF8800); // Orange on GETSEC
+  } else {
+    HvDrawDebugBox(0); // Live tick pulse dot at (2..10, 2..10) on every exit
+  }
 
   switch (reason) {
   case EXIT_REASON_CPUID:
@@ -1245,6 +1303,13 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
           __vmx_vmread(VMCS_IDT_VECTORING_ERROR, &errCode);
           __vmx_vmwrite(VMCS_ENTRY_EXCEPTION_ERROR, errCode);
         }
+        UINT64 evType = (idtInfo >> 8) & 7;
+        if (evType == 4 || evType == 5 || evType == 6) {
+          UINT64 exitInstrLen = 0;
+          __vmx_vmread(VMCS_EXIT_INSTR_LENGTH, &exitInstrLen);
+          if (exitInstrLen == 0) exitInstrLen = 1;
+          __vmx_vmwrite(VMCS_ENTRY_INSTR_LENGTH, exitInstrLen);
+        }
       }
     }
   }
@@ -1276,6 +1341,21 @@ BOOLEAN HvExitHandler(PGUEST_REGS regs) {
     // Windows Boot Manager and Windows Kernel multi-core invariant TSC checks
     // (CLOCK_WATCHDOG_TIMEOUT / KeQueryPerformanceCounter skew).
     // Instruction-level latency compensation is handled by CpuidTimingPad.
+
+    // Synchronize guest GDTR limit with guest TR selector (Intel SDM Vol 3C §26.3.1.2).
+    // If guest code (such as bootmgfw.efi) loaded a small GDT via LGDT without reloading TR,
+    // VMCS_GUEST_TR_SEL would exceed VMCS_GUEST_GDTR_LIMIT, causing fatal VMENTRY_FAIL_GUEST_STATE.
+    UINT64 guestGdtLimit = 0;
+    __vmx_vmread(VMCS_GUEST_GDTR_LIMIT, &guestGdtLimit);
+    UINT64 guestTrSel = 0;
+    __vmx_vmread(VMCS_GUEST_TR_SEL, &guestTrSel);
+    if ((guestTrSel & ~7ULL) + 15ULL > guestGdtLimit) {
+      __vmx_vmwrite(VMCS_GUEST_GDTR_LIMIT, (guestTrSel & ~7ULL) + 15ULL);
+    }
+  }
+
+  if (!resume) {
+    HvDrawDebugBox(0xFF0000); // Red on devirtualize / failure
   }
 
   return resume;

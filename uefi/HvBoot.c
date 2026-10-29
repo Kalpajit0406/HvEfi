@@ -1345,6 +1345,23 @@ HvBootTryChainSlot (
   if (VolRef != NULL && *VolRef != NULL) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     if (!EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&gop)) && gop != NULL && gop->Mode != NULL) {
+      volatile HV_MAILBOX *mb = NULL;
+      UINTN mi;
+      for (mi = 0; mi < sizeof (mFixedMailboxPa) / sizeof (mFixedMailboxPa[0]); mi++) {
+        volatile HV_MAILBOX *candidate = (volatile HV_MAILBOX *)(UINTN)mFixedMailboxPa[mi];
+        if (HvMailboxValid (candidate)) {
+          mb = candidate;
+          break;
+        }
+      }
+      if (mb != NULL) {
+        mb->GopFrameBufferBaseLow  = (UINT32)gop->Mode->FrameBufferBase;
+        mb->GopFrameBufferBaseHigh = (UINT32)(gop->Mode->FrameBufferBase >> 32);
+        if (gop->Mode->Info != NULL) {
+          mb->GopWidth  = gop->Mode->Info->HorizontalResolution;
+          mb->GopHeight = gop->Mode->Info->VerticalResolution;
+        }
+      }
       HvBootReceiptNum (*VolRef, "GOP fb_lo", (UINT32)gop->Mode->FrameBufferBase);
       HvBootReceiptNum (*VolRef, "GOP fb_hi", (UINT32)(gop->Mode->FrameBufferBase >> 32));
       HvBootReceiptNum (*VolRef, "GOP fb_size", (UINT32)gop->Mode->FrameBufferSize);
@@ -1366,31 +1383,11 @@ HvBootTryChainSlot (
   return status;
 }
 
-STATIC VOID
-HvBootConnectAll (
-  VOID
-  )
-{
-  EFI_STATUS  status;
-  UINTN       handleCount = 0;
-  EFI_HANDLE  *handleBuffer = NULL;
-  UINTN       i;
-
-  DEBUG ((DEBUG_INFO, "[HvBoot] Connecting all UEFI device drivers...\n"));
-  status = gBS->LocateHandleBuffer (
-                  AllHandles,
-                  NULL,
-                  NULL,
-                  &handleCount,
-                  &handleBuffer
-                  );
-  if (!EFI_ERROR (status) && handleBuffer != NULL) {
-    for (i = 0; i < handleCount; i++) {
-      gBS->ConnectController (handleBuffer[i], NULL, NULL, TRUE);
-    }
-    gBS->FreePool (handleBuffer);
-  }
-}
+// Note on ConnectAll:
+// Firmware BDS has already connected all storage and device controllers before HvBoot runs.
+// Calling ConnectController(..., Recursive=TRUE) on every handle recursively re-enters
+// InsydeH2O storage and bus drivers, triggering PCI resets or SMM state collisions that
+// cause bootmgfw.efi to stall during NVMe accesses on physical Dell hardware.
 
 STATIC EFI_STATUS
 HvBootChainloadWindows (
@@ -1407,7 +1404,7 @@ HvBootChainloadWindows (
   UINTN       count;
   BOOLEAN     found = FALSE;
 
-  HvBootConnectAll ();
+  // HvBootConnectAll omitted to preserve native BDS controller state and prevent NVMe resets
 
   DEBUG ((DEBUG_INFO, "[HvBoot] ChainloadWindows: reading BootOrder...\n"));
   // 1. Walk BootOrder to chainload Windows Boot Manager using its configured NVRAM slot

@@ -383,9 +383,15 @@ static __inline UINT8 HvMtrrTypeForPa(const HV_MTRR_STATE *m, UINT64 pa) {
 // This is the function the 9-bar asks for: the type classification is the
 // intersection, not either source alone.
 static __inline UINT32 HvEptMemTypeFromMtrr(UINT8 mtrrType, BOOLEAN paInRam) {
-    if (mtrrType != HV_MTRR_TYPE_WB)
-        return EPT_MEMORY_TYPE_UC;
-    return paInRam ? EPT_MEMORY_TYPE_WB : EPT_MEMORY_TYPE_UC;
+    // Under Intel SDM Vol 3C §28.2.7 Table 28-7:
+    // EPT_MEMORY_TYPE_WB allows physical hardware MTRRs and guest PAT to govern
+    // the effective memory type natively. Preserving WB in EPT ensures that
+    // Write-Combining (WC) MMIO (such as UEFI GOP framebuffers and GPU VRAM)
+    // functions at full hardware bus burst speed rather than being crushed into
+    // serialized uncacheable (UC) bus transactions that stall bootmgfw.efi.
+    (void)mtrrType;
+    (void)paInRam;
+    return EPT_MEMORY_TYPE_WB;
 }
 
 // ── Scatter-gather read contract ──────────────────────────────────────────

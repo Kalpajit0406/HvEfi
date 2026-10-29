@@ -356,8 +356,10 @@ typedef INT32  LONG;    /* EDK2 has no LONG; NT LONG is 32-bit signed */
 #define CR0_TS                          (1ULL << 3)    // task switched
 #define CR0_PG                          (1ULL << 31)   // paging
 #define CR4_VMXE                        (1ULL << 13)
+#define CR4_SMXE                        (1ULL << 14)
 #define CR4_FSGSBASE                    (1ULL << 16)
 #define CR4_OSXSAVE                     (1ULL << 18)
+#define CR4_CET                         (1ULL << 23)
 
 // ── EFER bits ───────────────────────────────────────────────────────────────
 
@@ -1406,6 +1408,39 @@ extern HV_GLOBAL g_Hv;
 extern volatile HV_MAILBOX *g_Mailbox;
 extern UINT16 g_HvHostBaseTssSlot;
 extern volatile UINT32 g_HvHostFaultSeen;
+
+static __inline void HvDrawDebugBox(UINT32 color) {
+#ifdef HV_EFI_BUILD
+  if (g_Mailbox == NULL || !HvMailboxValid(g_Mailbox)) return;
+  UINT64 fbPa = ((UINT64)g_Mailbox->GopFrameBufferBaseHigh << 32) | g_Mailbox->GopFrameBufferBaseLow;
+  if (fbPa == 0) return;
+  UINT32 width = g_Mailbox->GopWidth;
+  if (width == 0 || width > 4096) width = 1920;
+
+  volatile UINT32 *fb = (volatile UINT32 *)(UINTN)fbPa;
+
+  // Pulse dot at top-left (x=2..10, y=2..10) to visually verify exit processing is alive
+  static volatile UINT32 s_ExitTick = 0;
+  s_ExitTick++;
+  UINT32 tickColor = (s_ExitTick & 0x20) ? 0x00FF00 : 0xFFFF00;
+  for (UINT32 py = 2; py < 10; py++) {
+    for (UINT32 px = 2; px < 10; px++) {
+      fb[py * width + px] = tickColor;
+    }
+  }
+
+  // Draw prominent 600x30 banner across (x=100..700, y=10..40) for color alerts
+  if (color != 0) {
+    for (UINT32 y = 10; y < 40; y++) {
+      for (UINT32 x = 100; x < 700; x++) {
+        fb[y * width + x] = color;
+      }
+    }
+  }
+#else
+  (void)color;
+#endif
+}
 
 // ── Function declarations ───────────────────────────────────────────────────
 
