@@ -1410,7 +1410,7 @@ extern UINT16 g_HvHostBaseTssSlot;
 extern volatile UINT32 g_HvHostFaultSeen;
 
 static __inline void HvDrawDebugBox(UINT32 color) {
-#ifdef HV_EFI_BUILD
+#if 0
   if (g_Mailbox == NULL || !HvMailboxValid(g_Mailbox)) return;
   UINT64 fbPa = ((UINT64)g_Mailbox->GopFrameBufferBaseHigh << 32) | g_Mailbox->GopFrameBufferBaseLow;
   if (fbPa == 0) return;
