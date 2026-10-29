@@ -404,17 +404,16 @@ NTSTATUS HvEptInitialize(PEPT_STATE ept) {
                 // Force 4KB page granularity for APIC, HPET, and TPM MMIO spaces (0xFEC00000 - 0xFEFFFFFF).
                 // Intel SDM Vol 3C §29.2 mandates that APIC-access and memory-mapped APIC pages
                 // MUST NOT be mapped via large (2MB) page translations.
-                BOOLEAN forceSplit = (regionBase >= 0xFEC00000ULL && regionBase <= 0xFEE00000ULL);
+                BOOLEAN forceSplit = (regionBase >= 0xFEC00000ULL && regionBase <= 0xFEFFFFFFULL);
 
                 if (!forceSplit && HvRangeFullyCovers(ept->NormRanges, ept->NormRangeCount,
                                       regionBase, 1ULL << EPT_PD_SHIFT)) {
                     EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
                 } else if (!forceSplit && !HvRangeOverlaps(ept->NormRanges, ept->NormRangeCount,
                                            regionBase, 1ULL << EPT_PD_SHIFT)) {
-                    // Use WB so hardware MTRRs and guest PAT determine effective caching attributes!
-                    // (Intel SDM Vol 3C §28.2.7 Table 28-7: EPT WB preserves MTRR WC for GOP Framebuffers
-                    // whereas EPT UC overrides and destroys Write Combining, freezing display updates).
-                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
+                    // Non-RAM MMIO: MUST BE UNCACHEABLE (UC) so PCIe device registers (NVMe doorbells,
+                    // xHCI doorbells, etc.) are never held back in CPU L1 data cache!
+                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_UC);
                 } else {
                     // Mixed or forced-split region: split into 4KB pages
                     PEPT_PTE pt = EptBuildMixedPtPage(ept, regionBase);

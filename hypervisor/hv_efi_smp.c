@@ -110,6 +110,18 @@ static BOOLEAN TryCurrentCpuIndex(UINT32 *outIndex) {
 }
 
 PVCPU HvGetCurrentVcpu(void) {
+    // Fast path: if called from VM-exit context (running on a HostStack),
+    // identify the VCPU directly by stack address with ZERO CPUID instructions.
+    // Each VCPU has its own non-overlapping HostStack allocated below 4GB.
+    volatile char stackVar;
+    UINT64 currentSp = (UINT64)&stackVar;
+    for (UINT32 i = 0; i < g_Hv.VcpuCount; i++) {
+        UINT64 base = (UINT64)g_Hv.Vcpus[i].HostStack;
+        if (base != 0 && currentSp >= base && currentSp < base + g_Hv.Vcpus[i].HostStackSize) {
+            return &g_Hv.Vcpus[i];
+        }
+    }
+
     if (g_ApicIdsRecorded) {
         UINT32 apic = HvReadApicIdLocal();
         for (UINT32 i = 0; i < g_Hv.VcpuCount; i++) {

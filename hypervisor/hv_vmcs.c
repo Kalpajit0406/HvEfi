@@ -231,23 +231,25 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     UINT32 pinCtls = AdjustControls(0, MSR_IA32_VMX_TRUE_PINBASED_CTLS);
     HvVmWriteChecked(VMCS_PIN_BASED_CONTROLS, pinCtls);
 
-    // Primary proc-based: enable secondary controls, MSR bitmaps, and TSC
-    // offset. See HvDrv/hv_vmcs.c for the full rationale. Per-boot random
-    // shift stored in g_Hv.TscBootOffset; no per-exit adjustment.
+    // Primary proc-based: enable secondary controls, MSR bitmaps.
+    // In UEFI boot phase, do NOT enable PROC_BASED_USE_TSC_OFFSET:
+    // TSC base shift is 0 (HV_EFI_TSC_SHIFT=0 in hv_efi_vmx.c), and enabling
+    // hardware TSC offsetting introduces microcode overhead and potential
+    // skew with LAPIC/TSC-deadline timers during bootmgfw.efi calibration.
     UINT32 procCtls = AdjustControls(
-        PROC_BASED_ACTIVATE_SECONDARY | PROC_BASED_USE_MSR_BITMAPS |
-        PROC_BASED_USE_TSC_OFFSET,
+        PROC_BASED_ACTIVATE_SECONDARY | PROC_BASED_USE_MSR_BITMAPS,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
     HvVmWriteChecked(VMCS_PROC_BASED_CONTROLS, procCtls);
-    HvVmWriteChecked(VMCS_TSC_OFFSET, (UINT64)g_Hv.TscBootOffset);
+    HvVmWriteChecked(VMCS_TSC_OFFSET, 0);
 
-    // Secondary: EPT, VPID, RDTSCP, INVPCID, XSAVES, unrestricted guest.
-    // Unrestricted guest is required for INIT-SIPI AP bringup: the OS sends
-    // INIT-SIPI to wake APs, which must start in real mode (PE=0, PG=0).
-    // Without unrestricted guest, the VMCS cannot hold real-mode state.
-    // (no TRUE variant MSR exists for secondary proc-based controls)
+    // Secondary: EPT, RDTSCP, INVPCID, XSAVES, unrestricted guest.
+    // In UEFI boot phase, do NOT enable PROC2_ENABLE_VPID:
+    // Without VPID, Intel hardware automatically flushes all linear mappings
+    // and combined mappings on EVERY VM-exit and VM-entry (Intel SDM Vol 3C §28.3.2.1).
+    // This guarantees 100% clean TLB state when bootmgfw.efi transitions page
+    // tables and GOP video modes.
     UINT32 procCtls2 = AdjustControls(
-        PROC2_ENABLE_EPT | PROC2_ENABLE_VPID | PROC2_ENABLE_RDTSCP |
+        PROC2_ENABLE_EPT | PROC2_ENABLE_RDTSCP |
         PROC2_ENABLE_INVPCID | PROC2_ENABLE_XSAVES |
         PROC2_UNRESTRICTED_GUEST,
         MSR_IA32_VMX_PROCBASED_CTLS2);
@@ -314,8 +316,8 @@ NTSTATUS HvVmcsSetupCpu(PVCPU vcpu) {
     // MSR bitmap — all zeros = pass through all MSRs (no VM-exit)
     HvVmWriteChecked(VMCS_MSR_BITMAP, vcpu->MsrBitmapPhysical.QuadPart);
 
-    // VPID - unique per vCPU (0 is invalid)
-    HvVmWriteChecked(VMCS_VPID, (UINT64)(vcpu->ProcessorIndex + 1));
+    // VPID - unique per vCPU if enabled (0 if disabled)
+    HvVmWriteChecked(VMCS_VPID, (procCtls2 & PROC2_ENABLE_VPID) ? (UINT64)(vcpu->ProcessorIndex + 1) : 0);
 
     // EPT enabled with 1:1 identity map and decoy hiding
     HvVmWriteChecked(VMCS_EPT_PTR, g_Hv.Ept.EptPointer);

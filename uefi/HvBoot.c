@@ -1209,8 +1209,6 @@ HvBootTryChainSlot (
   UINT8                      *options;
   UINTN                      optionsSize;
   EFI_HANDLE                 winImage = NULL;
-  EFI_LOADED_IMAGE_PROTOCOL  *info = NULL;
-  EFI_GUID                   lipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
   EFI_GUID                   fsGuid  = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
 
   *Found = FALSE;
@@ -1333,18 +1331,14 @@ HvBootTryChainSlot (
     return status;
   }
 
-  // Set LoadOptions (BCD parameters from the Boot#### option)
-  // Only forward LoadOptions if it looks like a valid null-terminated UTF-16 string (starts with L'/' or L'-' or L'{' or L'\\').
-  // Dell firmware stores proprietary non-string binary diagnostics/recovery flags in Boot#### OptionalData
-  // which causes bootmgfw.efi to fail or stall if forwarded as image LoadOptions.
-  status = gBS->HandleProtocol (winImage, &lipGuid, (VOID **)&info);
-  if (!EFI_ERROR (status) && info != NULL && optionsSize >= 2 && options != NULL) {
-    CHAR16 firstChar = *(CHAR16 *)options;
-    if (firstChar == L'/' || firstChar == L'-' || firstChar == L'{' || firstChar == L'\\') {
-      info->LoadOptions     = options;
-      info->LoadOptionsSize = (UINT32)optionsSize;
-    }
-  }
+  // Do NOT overwrite info->LoadOptions.
+  // Windows Boot Manager (bootmgfw.efi) in Windows 11 24H2 enforces isolatedcontext
+  // and strict allowedinmemorysettings (0x15000075). Passing NVRAM Boot####
+  // OptionalData (which on Dell contains proprietary non-BCD strings or binary
+  // payload) as LoadOptions causes bootmgfw.efi to fail or stall.
+  // Leaving LoadOptions untouched lets bootmgfw.efi parse its internal BCD natively.
+  (void)options;
+  (void)optionsSize;
 
   *Found = TRUE;
 
@@ -1470,18 +1464,7 @@ HvBootChainloadWindows (
             status = gBS->LoadImage (TRUE, ImageHandle, winDevPath, NULL, 0, &winImage);
             gBS->FreePool (winDevPath);
             if (!EFI_ERROR (status) && winImage != NULL) {
-              VOID                      *optBuf = NULL;
-              UINT32                    optSize = 0;
-              EFI_LOADED_IMAGE_PROTOCOL *fsLip  = NULL;
-              EFI_GUID                  lipGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-
-              // Assign BCD LoadOptions even on filesystem walk fallback
-              if (!EFI_ERROR (gBS->HandleProtocol (winImage, &lipGuid, (VOID **)&fsLip)) && fsLip != NULL) {
-                if (HvBootGetWindowsLoadOptions (&optBuf, &optSize) && optBuf != NULL && optSize > 0) {
-                  fsLip->LoadOptions     = optBuf;
-                  fsLip->LoadOptionsSize = optSize;
-                }
-              }
+              // Do NOT assign LoadOptions on filesystem walk fallback for isolatedcontext
 
               if (VolRef != NULL && *VolRef != NULL) {
                 HvBootReceiptLine (*VolRef, "CHAIN WIN fs start");

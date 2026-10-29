@@ -108,11 +108,9 @@ BOOLEAN HvVmxIsSupported(void) {
     UINT64 procCtls2 = __readmsr(MSR_IA32_VMX_PROCBASED_CTLS2);
     if (!((procCtls2 >> 32) & PROC2_ENABLE_EPT))
         return FALSE;
-    // VPID is programmed in every VMCS (hv_vmcs.c writes VMCS_VPID), so the
-    // control must be allowed — mirrors HvDrv/hv_vmx.c. Without it VMLAUNCH
-    // fails on CPUs that cannot do VPID.
-    if (!((procCtls2 >> 32) & PROC2_ENABLE_VPID))
-        return FALSE;
+    // VPID is optional during UEFI boot (disabled by default for clean TLB flushes on exit/entry).
+    // If the hardware supports it, good; if not, we do not require it.
+    (void)procCtls2;
     // EPT / VPID capability gate (Pass 94). Mirrors HvDrv/hv_vmx.c.
     //
     // The first two checks were already here and were CORRECT - Pass 94 verified
