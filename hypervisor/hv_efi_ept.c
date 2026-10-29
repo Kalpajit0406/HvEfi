@@ -292,8 +292,6 @@ NTSTATUS HvEptCollectRamRanges(PEPT_STATE ept) {
             case EfiLoaderCode:
             case EfiLoaderData:
             case EfiACPIReclaimMemory:
-            case EfiACPIMemoryNVS:
-            case EfiReservedMemoryType:
                 isRam = TRUE;
                 break;
             default:
@@ -413,12 +411,9 @@ NTSTATUS HvEptInitialize(PEPT_STATE ept) {
                     EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
                 } else if (!forceSplit && !HvRangeOverlaps(ept->NormRanges, ept->NormRangeCount,
                                            regionBase, 1ULL << EPT_PD_SHIFT)) {
-                    // Non-RAM MMIO: Set to EPT_MEMORY_TYPE_WB so guest PAT and hardware MTRRs
-                    // govern effective caching attributes natively (Intel SDM Vol 3C §28.2.7 Table 28-7).
-                    // EPT WB preserves hardware Write Combining (WC) for GOP Framebuffers (0x4000000000)
-                    // while guest PAT sets UC for NVMe and PCIe registers. Setting EPT UC forces
-                    // all framebuffers to UC, causing display controller stalls and freezing boot.
-                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
+                    // Non-RAM MMIO: MUST BE UNCACHEABLE (UC) so PCIe device registers (NVMe doorbells,
+                    // xHCI doorbells, etc.) are never held back in CPU L1 data cache!
+                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_UC);
                 } else {
                     // Mixed or forced-split region: split into 4KB pages
                     PEPT_PTE pt = EptBuildMixedPtPage(ept, regionBase);
