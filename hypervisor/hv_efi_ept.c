@@ -401,14 +401,22 @@ NTSTATUS HvEptInitialize(PEPT_STATE ept) {
                 UINT64 regionBase = ((UINT64)g << EPT_PDPT_SHIFT) |
                                     ((UINT64)mi << EPT_PD_SHIFT);
 
-                if (HvRangeFullyCovers(ept->NormRanges, ept->NormRangeCount,
+                // Force 4KB page granularity for APIC, HPET, and TPM MMIO spaces (0xFEC00000 - 0xFEFFFFFF).
+                // Intel SDM Vol 3C §29.2 mandates that APIC-access and memory-mapped APIC pages
+                // MUST NOT be mapped via large (2MB) page translations.
+                BOOLEAN forceSplit = (regionBase >= 0xFEC00000ULL && regionBase <= 0xFEE00000ULL);
+
+                if (!forceSplit && HvRangeFullyCovers(ept->NormRanges, ept->NormRangeCount,
                                       regionBase, 1ULL << EPT_PD_SHIFT)) {
                     EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
-                } else if (!HvRangeOverlaps(ept->NormRanges, ept->NormRangeCount,
+                } else if (!forceSplit && !HvRangeOverlaps(ept->NormRanges, ept->NormRangeCount,
                                            regionBase, 1ULL << EPT_PD_SHIFT)) {
-                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_UC);
+                    // Use WB so hardware MTRRs and guest PAT determine effective caching attributes!
+                    // (Intel SDM Vol 3C §28.2.7 Table 28-7: EPT WB preserves MTRR WC for GOP Framebuffers
+                    // whereas EPT UC overrides and destroys Write Combining, freezing display updates).
+                    EptSetLargePage(&pd[mi], regionBase, EPT_MEMORY_TYPE_WB);
                 } else {
-                    // Mixed region: split into 4KB pages
+                    // Mixed or forced-split region: split into 4KB pages
                     PEPT_PTE pt = EptBuildMixedPtPage(ept, regionBase);
                     if (!pt) goto fail;
                     pd[mi].Value = EfiVaToPA(pt) | EPT_RWX;

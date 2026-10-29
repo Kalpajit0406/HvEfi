@@ -88,6 +88,7 @@
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/DevicePath.h>
+#include <Protocol/GraphicsOutput.h>
 #include <Guid/FileInfo.h>
 #include <Guid/GlobalVariable.h>
 #include <IndustryStandard/PeImage.h>
@@ -1333,15 +1334,31 @@ HvBootTryChainSlot (
   }
 
   // Set LoadOptions (BCD parameters from the Boot#### option)
+  // Only forward LoadOptions if it looks like a valid null-terminated UTF-16 string (starts with L'/' or L'-' or L'{' or L'\\').
+  // Dell firmware stores proprietary non-string binary diagnostics/recovery flags in Boot#### OptionalData
+  // which causes bootmgfw.efi to fail or stall if forwarded as image LoadOptions.
   status = gBS->HandleProtocol (winImage, &lipGuid, (VOID **)&info);
-  if (!EFI_ERROR (status) && info != NULL && optionsSize > 0) {
-    info->LoadOptions     = options;
-    info->LoadOptionsSize = (UINT32)optionsSize;
+  if (!EFI_ERROR (status) && info != NULL && optionsSize >= 2 && options != NULL) {
+    CHAR16 firstChar = *(CHAR16 *)options;
+    if (firstChar == L'/' || firstChar == L'-' || firstChar == L'{' || firstChar == L'\\') {
+      info->LoadOptions     = options;
+      info->LoadOptionsSize = (UINT32)optionsSize;
+    }
   }
 
   *Found = TRUE;
 
   if (VolRef != NULL && *VolRef != NULL) {
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+    if (!EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&gop)) && gop != NULL && gop->Mode != NULL) {
+      HvBootReceiptNum (*VolRef, "GOP fb_lo", (UINT32)gop->Mode->FrameBufferBase);
+      HvBootReceiptNum (*VolRef, "GOP fb_hi", (UINT32)(gop->Mode->FrameBufferBase >> 32));
+      HvBootReceiptNum (*VolRef, "GOP fb_size", (UINT32)gop->Mode->FrameBufferSize);
+      if (gop->Mode->Info != NULL) {
+        HvBootReceiptNum (*VolRef, "GOP width", gop->Mode->Info->HorizontalResolution);
+        HvBootReceiptNum (*VolRef, "GOP height", gop->Mode->Info->VerticalResolution);
+      }
+    }
     HvBootReceiptLine (*VolRef, "CHAIN WIN slot start");
     (*VolRef)->Close (*VolRef);
     *VolRef = NULL;
